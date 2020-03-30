@@ -21,7 +21,6 @@
     drwx-wx-wt 2 root root 68K Mar 25 14:08 /var/lib/php/sessions
     ```
 * Pour le process de mise à jour des informations, on peut penser
-
   * un cron toutes les mn (bof)
   * un surveillant inotify sur /var/lib/php/sessions (mais il va se déclencher souvent)
   * démon qui tourne en tâche de fond (compatible avec le inotify)
@@ -30,7 +29,7 @@
   * déterminer, soit par la taille soit par le contenu si on a là une vraie session ouverte, ou juste qq qui a accédé à la page de login
   * avoir une page apache accessible uniquement en local qui permet de fixer les valeurs dans APC
   * avoir un script en CLI qui permet de fixer le ou les seuils aisément, et de (dé)bloquer manuellement au besoin (si le problème est vraiment grave on passera sur vhost maintenance pour tout bloquer)
-  * et donc un script qui tourne assez souvent pour mettre à jour les informations nécessaires
+  * et donc un script qui tourne assez souvent pour mettre à jour les informations nécessaires. Il y a des sessions vides (fichier à 0 octets), et même un appel HTTP non connecté (visiteur, robot indexeur) créé une session. Ces sessions "vides" doivent être ignorées.
 * exemple, quelques sessions réelles de profnt2
   * une qui mentionne un compte, donc à priori une personne connectée
     `Default|a:1:{s:11:"initialized";b:1;}__ZF|a:1:{s:36:"vzn_a15774ed86e9f3eaebc925162120cec2";a:1:{s:3:"ENT";i:1585155117;}}vzn_xxxxxxxxxxxxxxx|a:1:{s:7:"storage";s:9:"compte_reel";}`
