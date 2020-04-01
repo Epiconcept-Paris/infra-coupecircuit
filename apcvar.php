@@ -7,8 +7,17 @@ $vars = [
 ]; 
 
 $nbv = count($vars);
+$out = array();
+$fmt = '';
 foreach ($_GET as $key => $val)
 {
+    if ($key == 'fmt' && $val == 'json')
+	$fmt = 'json';
+}
+foreach ($_GET as $key => $val)
+{
+    if ($key == 'fmt')
+	continue;
     for ($i = 0; $i < $nbv; $i++)
     {
 	if ($key == $vars[$i]['name'])
@@ -24,7 +33,7 @@ foreach ($_GET as $key => $val)
 	    elseif (function_exists('apcu_fetch'))
 		$apc = apcu_fetch($key);
 	    if ($apc !== false)
-		echo "$key=$apc\n";
+		$out[$key] = preg_replace('/\D/', '', $apc) == $apc ? intval($apc) : $apc;
 	}
 	else			// set
 	{
@@ -34,4 +43,13 @@ foreach ($_GET as $key => $val)
 		apcu_store($key, $val, $vars[$i]['ttl']);
 	}
     }
+}
+if ($fmt == 'json')
+{
+    echo json_encode($out)."\n";
+}
+else
+{
+    foreach ($out as $key => $val)
+	echo "$key=$val\n";
 }
