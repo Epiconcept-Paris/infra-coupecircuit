@@ -1,5 +1,5 @@
 /*
- *  phpnbsess.c
+ *  nbphpsess.c
  *
  *  Count PHP 'active' sessions in given directory
  *
@@ -11,7 +11,7 @@
  *	    if new file:
  *		add file to watcch
  *	    if file modified:
- *		check if active
+ *		check if active (contains "s:15:\"iConnectionType\";")
  * TBC...
  *
  */
