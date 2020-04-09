@@ -8,11 +8,11 @@
  *	- Main loop: wait for log, subproc and signals
  *
  *	- watch and restart both av[1] and av[2] if any dies
- *	- kill them both if SIGTERM
- *	- pass on SIGUSR1
+ *	- kill them both if SIGTERM, pass on SIGUSR1 (session ?)
  */
 #define _GNU_SOURCE
 #define _BSD_SOURCE
+#define _POSIX_SOURCE
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -26,8 +26,10 @@
 #include <regex.h>
 #include <signal.h>
 #include <string.h>
+#include <syslog.h>
 #include <time.h>
 #include <sys/types.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #if 0
@@ -38,7 +40,10 @@
 #define EX_USAGE	1
 #define EX_CONF		2
 #define EX_PATH		3
-#define EX_FORK		4
+
+#define EX_PIPE		4
+#define EX_FORK		5
+#define EX_EXEC		6
 
 #define EX_PROG		8
 #define EX_NOMEM	9
@@ -63,6 +68,14 @@
 #define CFGVAR_REFMT	"^\\s*%s\\s*=\\s*(\\S*)\\s*(#.*)?$"
 #define NB_CFGV_RESUBS	3
 
+typedef struct timeval timeval_t;
+
+typedef struct	sconvi_s
+{
+    char	*str;
+    int		val;
+}		sconvi_t;
+
 typedef union	cfgval_u
 {
 #   define	STRIVAL	NULL
@@ -71,11 +84,14 @@ typedef union	cfgval_u
     int		i;
 }		cfgval_t;
 
+struct	glob_s;	/* Needed for forward ref in cfgvar_t below */
+
 typedef struct	cfgvar_s
 {
     char	*name;
     short	isupd;		/* 1 if var updatable on reloads */
     short	isint;		/* 1 if var is int (vs str) */
+    int		(*icv)(struct glob_s *, const char *, int);	/* function to convert to int */
     cfgval_t	val;		/* value */
     cfgval_t	def;		/* default */
     regex_t	regexp;		/* compiled regexp for config parsing */
@@ -87,21 +103,16 @@ typedef struct	child_s
     char	*path;		/* actual exec path */
     char	*name;		/* basename */
     pid_t	pid;
+    time_t	kill_time;
+    FILE	*out_fp;
+    FILE	*err_fp;
 }		child_t;
 
 typedef	struct	glob_s
 {
-#define	BinDir		config[0].val.s
-#define	LogDir		config[1].val.s
-#define	RunDir		config[2].val.s
-#define	SessDir		config[3].val.s
-#define	LogWait		config[4].val.i
-#define	TraceLevel	config[5].val.i
-#define CFG_IVALS	{ {.s=STRIVAL}, {.s=STRIVAL}, {.s=STRIVAL}, {.s=STRIVAL}, {.i=NUMIVAL}, {.i=NUMIVAL} }
-#define NB_CFGVARS	6
-    cfgvar_t	config[NB_CFGVARS];
+#define NB_CFGVARS	10
+    cfgvar_t	config[NB_CFGVARS];	/* Must be 1st member for init */
 
-    char	buf[32];
     char	*prg;		/* basename from av[0] */
     char	*prg_dir;
     char	*pkg;		/* our package name (final 'd' removed) */
@@ -116,22 +127,62 @@ typedef	struct	glob_s
 
     char	*pid_path;
     char	*cfg_path;
-    int		nb_cv;
+    char	*cfg_env;
 
     int		loop;
     int		sig;
-    time_t	now;
 }		glob_t;
 
-/*  'globals' is used in main(), signal handlers and log functions */
+/*
+ *  Initialize 'globals'
+ *	used as 'globals' only in main(), signal handlers and log functions
+ *	used as 'glob_t *g' everywhere else
+*/
+int	intv(glob_t *, const char *, int);
+int	sigv(glob_t *, const char *, int);
+int	facv(glob_t *, const char *, int);
+int	lvlv(glob_t *, const char *, int);
+
 glob_t		globals = {
+
+/*	When adding to the config variables belon, don't forget to:
+ *	  - update the NB_CFGVARS macro in glob_t definition above
+ *	  - add default values to the CFG_IVALS macro below
+ */
+#	define BinDir		config[0].val.s
+#	define LogDir		config[1].val.s
+#	define RunDir		config[2].val.s
+#	define SessDir		config[3].val.s
+#	define LogWait		config[4].val.i
+#	define TraceLevel	config[5].val.i
+#	define TlvConv		config[5].icv
+#	define SigReload	config[6].val.i
+#	define SigRotate	config[7].val.i
+#	define SyslogFac	config[8].val.i
+#	define SyslogLvl	config[9].val.i
+#	define CFG_IVALS	{ \
+	{.s=STRIVAL},\
+	{.s=STRIVAL},\
+	{.s=STRIVAL},\
+	{.s=STRIVAL},\
+	{.i=NUMIVAL},\
+	{.i=NUMIVAL},\
+	{.i=NUMIVAL},\
+	{.i=NUMIVAL},\
+	{.i=NUMIVAL},\
+	{.i=NUMIVAL}\
+    }
     {
-	{ "bin_dir",		0, 0, { .s = STRIVAL },	{ .s = "/usr/bin" },	{} },
-	{ "log_dir",		0, 0, { .s = STRIVAL },	{ .s = "/var/log/%s" },	{} },
-	{ "run_dir",		0, 0, { .s = STRIVAL },	{ .s = "/run/%s" },	{} },
-	{ "sess_dir",		0, 0, { .s = STRIVAL },	{ .s = "/var/lib/php/sessions" }, {} },
-	{ "log_wait",		1, 1, { .i = NUMIVAL },	{ .i = 5 },		{} },
-	{ "dtrace_level",	1, 1, { .i = NUMIVAL },	{ .i = 0 },		{} }
+	{ "bin_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/usr/bin" },	{} },
+	{ "log_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/var/log/%s" },	{} },
+	{ "run_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/run/%s" },	{} },
+	{ "sess_dir",		1, 0, NULL, { .s = STRIVAL },	{ .s = "/var/lib/php/sessions" }, {} },
+	{ "log_wait",		1, 1, intv, { .i = NUMIVAL },	{ .i = 5 },		{} },
+	{ "dtrace_level",	1, 1, intv, { .i = NUMIVAL },	{ .i = 0 },		{} },
+	{ "conf_reload_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR1 },	{} },
+	{ "log_rotate_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR2 },	{} },
+	{ "syslog_facility",	1, 1, facv, { .i = NUMIVAL },	{ .i = LOG_LOCAL0 },	{} },
+	{ "syslog_level",	1, 1, lvlv, { .i = NUMIVAL },	{ .i = LOG_CRIT },	{} }
     }
 };
 
@@ -149,9 +200,9 @@ glob_t		globals = {
 #define report(f,a...)		logmsg(0,__FUNCTION__,__LINE__,"REPORT: ",f,##a)
 #define error(e,f,a...)		logmsg(e,__FUNCTION__,__LINE__,"ERROR: ",f,##a)
 
-#define trace(l,f,a...)		trcmsg(l,__FUNCTION__,__LINE__,f,##a)
-
 #define errexit(x,e,f,a...)	xitmsg(x,e,__FUNCTION__,__LINE__,f,##a)
+
+#define trace(l,f,a...)		trcmsg(l,__FUNCTION__,__LINE__,f,##a)
 /*
  * ====	Logging and tracing functions ==================================
  */
@@ -236,6 +287,32 @@ void		logmsg(int syserr, const char *fn, int ln, char *tag, char *fmt, ...)
     }
 }
 
+void		xitmsg(int xcode, int syserr, const char *fn, int ln, char *fmt, ...)
+{
+    va_list	ap;
+    char	buf[LOG_BUF_SIZE];
+    char	*line, *p;
+    int		first = true;
+
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (buf[0] != '\0')
+    {
+	p = buf;
+	while ((line = strsep(&p, "\r\n")) != NULL)
+	{
+	    if (*line != '\0')
+	    {
+		logline(first ? syserr : 0, fn, ln, first ? "" : "    ", line);
+		first = false;
+	    }
+	}
+    }
+    unlink(globals.pid_path);
+    exit(xcode);
+}
+
 void		trcmsg(int level, const char *fn, int ln, char *fmt, ...)
 {
     va_list	ap;
@@ -261,20 +338,6 @@ void		trcmsg(int level, const char *fn, int ln, char *fmt, ...)
 	    }
 	}
     }
-}
-
-void		xitmsg(int xcode, int syserr, const char *fn, int ln, char *fmt, ...)
-{
-    va_list	ap;
-    char	buf[LOG_BUF_SIZE];
-
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
-    va_end(ap);
-
-    logline(syserr, fn, ln, "ERROR: ", buf);
-
-    exit(xcode);
 }
 
 /*
@@ -402,39 +465,12 @@ pid_t		dead_wait(char *reason)
     return pid;
 }
 
-void		dead_care(glob_t *g)
-{
-    pid_t	pid;
-    char	reason[32];
-    int		i;
-
-    while ((pid = dead_wait(reason)) > 0)
-    {
-	for (i = 0; i < (sizeof g->children / sizeof(child_t)); i++)
-	{
-	    if (pid == g->children[i].pid)
-	    {
-		char    *msg = "%s PID=%d stopped (%s)";
-
-		if (reason[0] == '!')
-		    report(msg, g->children[i].name, pid, reason + 1);
-		else
-		    info(msg, g->children[i].name, pid, reason);
-		g->children[i].pid = 0;
-	    }
-	    else
-		report("unknown process PID=%d termination (%s)", pid, reason);
-	}
-    }
-    return;
-}
-
 /*
  * ====	Parse config file ==============================================
  *
- *  Initialize 'globals.config'
+ *  Return regcomp / regex error string
  */
-char	*re_err(regex_t *rep, int errcode)
+char		*re_err(regex_t *rep, int errcode)
 {
     static char	msg[1024];
 
@@ -443,6 +479,9 @@ char	*re_err(regex_t *rep, int errcode)
     return msg;
 }
 
+/*
+ *  Compile regexps in 'globals.config'
+ */
 void		conf_init(glob_t *g)
 {
     cfgvar_t	*vp;
@@ -469,28 +508,37 @@ void		conf_init(glob_t *g)
     }
 }
 
+void		set_cfg_env(glob_t *g, char *var)
+{
+    char	*env;
+
+    xasprintf(&env, "%s=%s", var, g->cfg_path);
+    if (putenv(env) != 0)
+	errexit(EX_NOMEM, 0, "unable to allocate memory");
+}
+
 /*
  *  Determine config path
  */
-void	get_cfgpath(glob_t *g)
+void		get_cfgpath(glob_t *g)
 {
-    char    ev[32];
-    char    path[PATH_MAX];
-    char    *p;
-    int	    i;
+    char	env_var[32];
+    char	path[PATH_MAX];
+    char	*p;
+    int		i;
 
     if (g->cfg_path != NULL)	/* Was set by parse_args */
 	return;
 
     /* Make variable name */
-    if (snprintf(ev, sizeof ev, CFGPATH_ENVFMT, g->pkg) >= sizeof ev)
+    if (snprintf(env_var, sizeof env_var, CFGPATH_ENVFMT, g->pkg) >= sizeof env_var)
 	errexit(EX_CONF, 0, "cannot make configuration file env variable");
     for (i = 0; i < strlen(g->pkg); i++)
-	ev[i] = toupper(ev[i]);
-    trace(TL_CONF, "env var = %s", ev);
+	env_var[i] = toupper(env_var[i]);
+    trace(TL_CONF, "env var = %s", env_var);
 
     /* Try from getenv */
-    if ((p = getenv(ev)) != NULL)
+    if ((p = getenv(env_var)) != NULL)
     {
 	trace(TL_CONF, "trying cfg_path = %s", p);
 	if (access(p, R_OK) == 0)
@@ -506,6 +554,7 @@ void	get_cfgpath(glob_t *g)
     if (access(path, R_OK) == 0)
     {
 	g->cfg_path = xstrdup(path);	/* free: never (init 2) */
+	set_cfg_env(g, env_var);
 	return;
     }
 
@@ -515,18 +564,137 @@ void	get_cfgpath(glob_t *g)
     if (access(path, R_OK) == 0)
     {
 	g->cfg_path = xstrdup(path);	/* free: never (init 3) */
+	set_cfg_env(g, env_var);
 	return;
     }
     errexit(EX_CONF, 0, "cannot find config-file %s.conf in args, env, %s or " CFG_DEFDIR, g->pkg, g->cfg_path);
 }
 
 /*
+ *  String to integer conversion functions
+ *
+ *	Check integer value
+ */
+int		intv(glob_t *g, const char *s, int ln)
+{
+    const char	*p = s;
+
+    while (*p != '\0')
+    {
+	if (*p != '-' && (*p <= '0' || *p >= '9'))
+	{
+	    if (ln > 0)
+		errexit(EX_CONF, 0, "non-numeric character '%c' in value at line %d of %s", *p, ln, g->cfg_path);
+	    else
+		errexit(EX_CONF, 0, "non-numeric character '%c' in value \"%s\"", *p, s);
+	}
+	p++;
+    }
+    return atoi(s);
+}
+
+/*	Generic string to int conversion. Also returns list of valid strings. */
+
+int		stoi(sconvi_t *tbl, int sz, const char *s, char **help, char *sep)
+{
+    int		i, nb;
+
+    for (i = 0; i < sz; i++)
+    {
+	if (strcmp(tbl[i].str, s) == 0)
+	    return tbl[i].val;
+    }
+
+    /* Not founf: build help text for values */
+    *help = xmalloc(LOG_BUF_SIZE);	/* free: never (init) */
+    nb = 0;
+    for (i = 0; i < sz; i++)
+    {
+	nb += snprintf(*help + nb, LOG_BUF_SIZE - nb, "%s%s", i > 0 ? sep : "", tbl[i].str);
+    }
+    return NUMIVAL;
+}
+
+/*	Convert signal name to signal number */
+int		sigv(glob_t *g, const char *s, int ln)
+{
+    sconvi_t	tbl[] = {
+	{ "SIGHUP",	SIGHUP	},
+	{ "SIGUSR1",	SIGUSR1	},
+	{ "SIGUSR2",	SIGUSR2	},
+	{ "HUP",	SIGHUP	},
+	{ "USR1",	SIGUSR1	},
+	{ "USR2",	SIGUSR2	}
+    };
+    char	*help = NULL;
+    int		val;
+
+    if ((val = stoi(tbl, sizeof tbl / sizeof tbl[0], s, &help, ", ")) != NUMIVAL)
+	return val;
+    errexit(EX_CONF, 0, "unknown signal name \"%s\" at line %d of %s\nKnown signal values: %s", s, ln, g->cfg_path, help);
+    return NUMIVAL;
+}
+
+/*	Convert syslog facility name to value  */
+
+int		facv(glob_t *g, const char *s, int ln)
+{
+    sconvi_t	tbl[] = {
+	{ "DAEMON",	LOG_DAEMON },
+	{ "LOCAL0",	LOG_LOCAL0 },
+	{ "LOCAL1",	LOG_LOCAL1 },
+	{ "LOCAL2",	LOG_LOCAL2 },
+	{ "LOCAL3",	LOG_LOCAL3 },
+	{ "LOCAL4",	LOG_LOCAL4 },
+	{ "LOCAL5",	LOG_LOCAL5 },
+	{ "LOCAL6",	LOG_LOCAL6 },
+	{ "LOCAL7",	LOG_LOCAL7 },
+	{ "USER",	LOG_DAEMON }
+    };
+    char	*help = NULL;
+    int		val;
+
+    if ((val = stoi(tbl, sizeof tbl / sizeof tbl[0], s, &help, ", ")) != NUMIVAL)
+	return val;
+    errexit(EX_CONF, 0, "unknown syslog facility \"%s\" at line %d of %s\nKnown facility values: %s", s, ln, g->cfg_path, help);
+    return NUMIVAL;
+}
+
+/*	Convert syslog level name to value  */
+
+int		lvlv(glob_t *g, const char *s, int ln)
+{
+    sconvi_t	tbl[] = {
+	{ "ALERT",	LOG_ALERT	},
+	{ "CRIT",	LOG_CRIT	},
+	{ "ERR",	LOG_ERR		},
+	{ "ERROR",	LOG_ERR		},
+	{ "WARN",	LOG_WARNING	},
+	{ "WARNING",	LOG_WARNING	},
+	{ "NOTICE",	LOG_NOTICE	},
+	{ "INFO",	LOG_INFO	},
+	{ "DEBUG",	LOG_DEBUG	}
+    };
+    char	*help = NULL;
+    int		val;
+
+    if ((val = stoi(tbl, sizeof tbl / sizeof tbl[0], s, &help, ", ")) != NUMIVAL)
+	return val;
+    errexit(EX_CONF, 0, "unknown syslog level \"%s\" at line %d of %s\nKnown level values: %s", s, ln, g->cfg_path, help);
+    return NUMIVAL;
+}
+
+/*
  *  Parse config file (called at init and config reloads)
  */
-void	parse_conf(glob_t *g)
+void		parse_conf(glob_t *g)
 {
     regmatch_t	match[NB_CFGV_RESUBS], *mp = &match[1];
+#ifdef CFG_IVALS
     cfgval_t	nv[NB_CFGVARS] = CFG_IVALS;
+#else
+    cfgval_t	nv[NB_CFGVARS];
+#endif
     cfgvar_t	*vp;
     char	**lines;
     char	*buf, *p;
@@ -569,6 +737,15 @@ void	parse_conf(glob_t *g)
     /*
      *	Parse file into new values array 'nv'
      */
+#ifndef CFG_IVALS
+    for (iv = 0; iv < NB_CFGVARS; iv++)
+    {
+	if (g->config[iv].isint)
+	    nv[iv].i = NUMIVAL;
+	else
+	    nv[iv].s = STRIVAL;
+    }
+#endif
     for (ln = 0; ln < nl; ln++)
     {
 	if (lines[ln][0] == '\0' || lines[ln][0] == '#')
@@ -585,14 +762,14 @@ void	parse_conf(glob_t *g)
 		xasprintf(&p, "%.*s", mp->rm_eo - mp->rm_so, lines[ln] + mp->rm_so);	/* free: just below */
 		if (vp->isint)
 		{
-		    int	val = atoi(p);
+		    n = vp->icv(g, p, ln);
 
 		    xfree(p);	/* not needed for integer */
 		    if (nv[iv].i != NUMIVAL)
-			notice("in %s line %d, %s redefined: %d -> %d", g->cfg_path, 1 + ln, vp->name, nv[iv].i, val);
+			notice("in %s line %d, %s redefined: %d -> %d", g->cfg_path, 1 + ln, vp->name, nv[iv].i, n);
 		    else
-			trace(TL_CONF, "in %s line %d: %s = %d", g->cfg_path, 1 + ln, vp->name, val);
-		    nv[iv].i = val;
+			trace(TL_CONF, "in %s line %d: %s = %d", g->cfg_path, 1 + ln, vp->name, n);
+		    nv[iv].i = n;
 		}
 		else
 		{
@@ -637,7 +814,16 @@ void	parse_conf(glob_t *g)
 	    if (vp->val.s == STRIVAL || vp->isupd)
 	    {
 		if (vp->val.s != STRIVAL)
+		{
+		    if (strcmp (vp->val.s, p) != 0)	/* value changed */
+		    {
+			void	kill_children(glob_t *, int);
+
+			if (strcmp(vp->name, "sess_dir") == 0)
+			    kill_children(g, SIGTERM);
+		    }
 		    xfree(vp->val.s);
+		}
 		vp->val.s = xstrdup(p);
 	    }
 	    else if (nv[iv].s == STRIVAL || strcmp(vp->val.s, nv[iv].s) != 0)
@@ -648,16 +834,16 @@ void	parse_conf(glob_t *g)
 }
 
 /*
- *=====	Parse command line and exe filename ============================
+ *=====	Parse command line and check paths =============================
  */
-char	*check_abs(char *p)
+char		*check_abs(char *p)
 {
     if (*p != '/')
 	errexit(EX_USAGE, 0, "specified path \"%s\" must be absolute", p);
     return p;
 }
 
-void	parse_args(glob_t *g, int ac, char **av)
+void		parse_args(glob_t *g, int ac, char **av)
 {
     char	*exe, *p;
     int		argerr = 0, len, val, i;
@@ -692,7 +878,7 @@ void	parse_args(glob_t *g, int ac, char **av)
 	    case 'f':	g->cfg_path = xstrdup(check_abs(optarg));	break;	/* free: never (init) */
 	    case 'l':	g->log_path = xstrdup(check_abs(optarg));	break;	/* free: never (init) */
 	    case 'r':	g->rep_path = xstrdup(check_abs(optarg));	break;	/* free: never (init) */
-	    case 't':	g->TraceLevel = atoi(optarg);			break;
+	    case 't':	g->TraceLevel = g->TlvConv(g, optarg, 0);	break;
 	    default:	argerr = 1;		break;
 	}
     }
@@ -723,10 +909,10 @@ void	parse_args(glob_t *g, int ac, char **av)
 	notice("ignoring %d extra arguments", ac);
 }
 
-char    *path_split(char *path, char **file)
+char		*path_split(char *path, char **file)
 {
-    static  char    dir[PATH_MAX];
-    char    *p;
+    static char	dir[PATH_MAX];
+    char	*p;
 
     if ((p = strrchr(path, '/')) == NULL)
 	errexit(EX_PROG, 0, "cannot find '/' in path \"%s\"", path);
@@ -746,36 +932,36 @@ char    *path_split(char *path, char **file)
  *	child 0 exec
  *	child 1 exec
  */
-void	check_paths(glob_t *g)
+void		check_paths(glob_t *g)
 {
-    char    *spec, *dir, *file;
-    int	    i;
+    char	*spec, *dir, *file;
+    int		i;
 
     /*
      *	Log-file. Try:
      *	    file given with -l
      *	    <pkg>.log in log_dir
+     *	Both file (if exists) and directory must be writable
      */
-    spec = " specified";
+    spec = "specified";
     if (g->log_path == NULL)	/* Was not in command line */
     {
 	xasprintf(&g->log_path, "%s/%s.log", g->LogDir, g->pkg);	/* free: never (init or abort) */
-	spec = "";
+	spec = "assembled";
     }
     trace(TL_CONF, "trying log_path = %s", g->log_path);
     if (access(g->log_path, W_OK) != 0)		/* file not writable */
     {
 	if (access(g->log_path, F_OK) == 0)	/* file exists, not writable */
-	    errexit(EX_PATH, 0, "cannot write to%s log-file %s", spec, g->log_path);
-
-	dir = path_split(g->log_path, &file);	/* Get dir and file parts */
-	trace(TL_CONF, "trying log_dir = %s", dir);
-	if (access(dir, W_OK) != 0)		/* dir not writable */
-	    errexit(EX_PATH, 0, "cannot create log-file %s in dir %s", file, dir);
+	    errexit(EX_PATH, 0, "cannot write to %s log-file %s", spec, g->log_path);
     }
+    dir = path_split(g->log_path, &file);	/* Get dir and file parts */
+    trace(TL_CONF, "trying log_dir = %s", dir);
+    if (access(dir, W_OK) != 0)		/* dir not writable */
+	errexit(EX_PATH, 0, "cannot create log-files in dir %s", dir);
 
     /*
-     *  Report-file: check arg or its dir are writable
+     *  Report-file: check that arg and its dir are writable
      */
     if (g->rep_path != NULL)	/* Only from command line */
     {
@@ -784,12 +970,11 @@ void	check_paths(glob_t *g)
 	{
 	    if (access(g->rep_path, F_OK) == 0)	/* file exists, not writable */
 		errexit(EX_PATH, 0, "cannot write to specified report-file %s", g->rep_path);
-
-	    dir = path_split(g->rep_path, &file);	/* Get dir and file parts */
-	    trace(TL_CONF, "trying rep_dir = %s", dir);
-	    if (access(dir, W_OK) != 0)			/* dir not writable */
-		errexit(EX_PATH, 0, "cannot create report-file %s in dir %s", file, dir);
 	}
+	dir = path_split(g->rep_path, &file);	/* Get dir and file parts */
+	trace(TL_CONF, "trying rep_dir = %s", dir);
+	if (access(dir, W_OK) != 0)			/* dir not writable */
+	    errexit(EX_PATH, 0, "cannot create report-files in dir %s", dir);
     }
 
     /*
@@ -798,6 +983,7 @@ void	check_paths(glob_t *g)
     trace(TL_CONF, "trying run_dir = %s", g->RunDir);
     if (access(g->RunDir, W_OK) != 0)
 	errexit(EX_PATH, 0, "cannot write to directory %s", g->RunDir);
+    xasprintf(&g->pid_path, "%s/%s.pid", g->RunDir, g->prg);
 
     /*
      *	Path to children. Try:
@@ -848,17 +1034,277 @@ void	check_paths(glob_t *g)
     }
 }
 
-void	setup_loop(glob_t *g)
+/*
+ *=====	Handle logs open / write =======================================
+ */
+void		log_sys(glob_t *g, const char *fmt, ...)
 {
-/* XXX */
+    va_list	ap;
+
+    va_start(ap, fmt);
+    openlog(g->prg, LOG_PID, g->SyslogFac);
+    syslog(g->SyslogLvl, fmt, ap);
+    closelog();
+    va_end(ap);
 }
 
-void	handle_children(glob_t *g)
+void		open_logs(glob_t *g)
 {
+    char	*rep = g->rep_path != NULL ? g->rep_path : "/dev/null";
+
+    if (g->rep_fp != NULL)
+    {
+	fclose(g->rep_fp);
+	g->rep_fp = NULL;
+    }
+    if ((g->rep_fp = fopen(rep, "a")) == NULL)
+       log_sys(g, "cannot (re)open %s: %s (errno=%d)", rep, strerror(errno), errno);
+
+    if (g->log_fp != NULL)
+    {
+	fclose(g->log_fp);
+	g->log_fp = NULL;
+    }
+    if ((g->log_fp = fopen(g->log_path, "a")) == NULL)
+       log_sys(g, "cannot (re)open %s: %s (errno=%d)", g->log_path, strerror(errno), errno);
 }
 
-void	handle_logs(glob_t *g)
+int		prepare_fdset(glob_t *g, fd_set *readfd)
 {
+    int		max = 0, fd;
+
+    FD_ZERO(readfd);
+
+    if (g->children[0].err_fp != NULL)
+    {
+	fd = fileno(g->children[0].err_fp);
+	FD_SET(fd, readfd);
+	if (fd > max)
+	    max = fd;
+    }
+    if (g->children[1].out_fp != NULL)
+    {
+	fd = fileno(g->children[1].out_fp);
+	FD_SET(fd, readfd);
+	if (fd > max)
+	    max = fd;
+    }
+    if (g->children[1].err_fp != NULL)
+    {
+	fd = fileno(g->children[1].err_fp);
+	FD_SET(fd, readfd);
+	if (fd > max)
+	    max = fd;
+    }
+    return max;
+}
+
+void		get_put_log(FILE *from, FILE *to, char *name, char *tag)
+{
+    char	buf[LOG_BUF_SIZE];
+
+    if (fgets(buf, sizeof buf, from) != NULL)
+	fprintf(to, "%s\t%s %s: %s", tstamp(" "), name, tag, buf);
+}
+
+void		handle_logs(glob_t *g)
+{
+    timeval_t	timeout;
+    fd_set	readfd;
+    int		ret, max;
+
+    timeout.tv_sec = g->LogWait;
+    timeout.tv_usec = 0;
+    max = prepare_fdset(g, &readfd);
+    if ((ret = select(max + 1, &readfd, NULL, NULL, &timeout)) < 0)
+    {
+	if (errno == EINTR)
+	{
+	    if (g->sig == 0)
+		error(0, "select interrupted with no signal ?");
+	}
+	else if (errno == EBADF)
+	{
+	    /*	Bad file descriptor: try to find which */
+	    int	fd, n = getdtablesize();
+
+	    for (fd = 0; fd < n; fd++)
+	    {
+		if (FD_ISSET(fd, &readfd) && fcntl(fd, F_GETFL, NULL) == -1 && errno == EBADF)
+		    error(0, "fd=%d was in fdsets but is closed", fd);
+	    }
+	    error(0, "select max=%d", max);
+	}
+	else
+	    error(errno, "select");
+    }
+    else if (ret > 0)
+    {
+	FILE	*fp;
+
+	fp = g->children[0].err_fp;
+	if (fp != NULL && FD_ISSET(fileno(fp), &readfd))
+	    get_put_log(fp, g->log_fp, g->children[0].name, "errlog");
+
+	fp = g->children[1].out_fp;
+	if (fp != NULL && FD_ISSET(fileno(fp), &readfd))
+	    get_put_log(fp, g->rep_path != NULL ? g->rep_fp : g->log_fp, g->children[1].name, "report");
+
+	fp = g->children[1].err_fp;
+	if (fp != NULL && FD_ISSET(fileno(fp), &readfd))
+	    get_put_log(fp, g->log_fp, g->children[1].name, "errlog");
+    }
+}
+
+/*
+ *=====	Handle children creation / burial ==============================
+ */
+void		kill_children(glob_t *g, int sig)
+{
+    int		i;
+
+    for (i = 0; i < NB_CHILDREN; i++)
+    {
+	child_t	*cp = &g->children[i];
+
+	if (cp->pid > 0 && cp->kill_time == 0)
+	{
+	    kill(cp->pid, sig);
+	    cp->kill_time = time(NULL);
+	}
+    }
+}
+
+void		bury_children(glob_t *g)
+{
+    pid_t	pid;
+    char	reason[32];
+    int		i;
+
+    while ((pid = dead_wait(reason)) > 0)
+    {
+	for (i = 0; i < NB_CHILDREN; i++)
+	{
+	    child_t	*cp = &g->children[i];
+
+	    if (pid == cp->pid)
+	    {
+		char    *msg = "%s PID=%d stopped (%s)";
+
+		if (reason[0] == '!')
+		    report(msg, cp->name, pid, reason + 1);
+		else
+		    info(msg, cp->name, pid, reason);
+
+		cp->pid = 0;
+		cp->kill_time = 0;
+		if (cp->out_fp != NULL)
+		{
+		    fclose(cp->out_fp);
+		    cp->out_fp = NULL;
+		}
+		fclose(cp->err_fp);
+		cp->err_fp = NULL;
+	    }
+	    else
+		report("unknown process PID=%d termination (%s)", pid, reason);
+	}
+    }
+    return;
+}
+
+void		handle_children(glob_t *g)
+{
+    int		i, pipes[8];
+
+    bury_children(g);
+    /* If any child still active, wait until it dies */
+    for (i = 0; i < NB_CHILDREN; i++)
+    {
+	child_t	*cp = &g->children[i];
+
+	if (cp->pid > 0)
+	{
+	    time_t	t = time(NULL);
+
+	    if (cp->kill_time > 0 && t >= (cp->kill_time + 10))
+	    {
+		kill(cp->pid, SIGKILL);
+		cp->kill_time = t;
+	    }
+	    return;
+	}
+    }
+    /*
+     *	Reminder: pipe[0] is read-end, pipe[1] is write-end
+     *
+     *	Open pipes. We need a pair for each of
+     *	  - main pipe01 for stdout from(1) child0 to(0) child1 stdin
+     *	  - pipe23 for stderr from(3) child0 stderr to(2) us
+     *	  - pipe45 for stdout from(5) child1 stdout to(4) us
+     *	  - pipe67 for stderr from(7) child1 stderr to(6) us
+     */
+    for (i = 0; i < (sizeof pipes / (2 * sizeof(int))); i++)
+    {
+	if (pipe2(pipes + (2 *i), O_DIRECT) < 0)
+	    errexit(EX_PIPE, errno, "cannot create pipes[%d] - Aborting", i);
+    }
+    /* Start children */
+    for (i = 0; i < NB_CHILDREN; i++)
+    {
+	child_t	*cp = &g->children[i];
+	int	pid;
+
+	if ((pid = fork()) == 0)
+	{
+	    fclose(g->rep_fp);
+	    fclose(g->log_fp);
+	    if (i == 0)
+	    {
+		/* stdin:-, stdout:1, stderr:3 */
+		dup(pipes[1]);
+		dup(pipes[3]);
+	    }
+	    else if (i == 1)
+	    {
+		/* stdin:0, stdout:5, stderr:7 */
+		fclose(stdin);
+		dup(pipes[0]);
+		dup(pipes[5]);
+		dup(pipes[7]);
+	    }
+	    for (i = 0; i < (sizeof pipes / sizeof(int)); i++)
+		close(pipes[i]);
+	    execl(cp->path, cp->path, NULL);
+	    log_sys(g, "cannot exec %s: %s (errno=%d)", cp->path, strerror(errno), errno);
+	    exit(EX_EXEC);
+	}
+	else if (pid > 0)
+	{
+	    if (i == 0)
+	    {
+		close(pipes[0]);
+		close(pipes[1]);
+		cp->err_fp = fdopen(dup(pipes[2]), "a");
+		close(pipes[2]);
+		close(pipes[3]);
+	    }
+	    else if (i == 1)
+	    {
+		cp->out_fp = fdopen(dup(pipes[4]), "a");
+		close(pipes[4]);
+		close(pipes[5]);
+		cp->err_fp = fdopen(dup(pipes[6]), "a");
+		close(pipes[6]);
+		close(pipes[7]);
+	    }
+	    cp->pid = pid;
+	    cp->kill_time = 0;
+	    info("started %s (PID=%d)\n", cp->name, pid);
+	}
+	else	/* we should close pipes, but exit anyhow */
+	    errexit(EX_FORK, errno, "cannot fork child%d (%s) - Aborting", i, cp->name);
+    }
 }
 
 /*
@@ -875,7 +1321,12 @@ void 		terminate(int sig)
     globals.loop = 0;	/* exit on SIGTERM */
 }
 
-int main(int ac, char **av)
+void		write_pid(glob_t *g)
+{
+/* XXX */
+}
+
+int		main(int ac, char **av)
 {
     glob_t	*g = &globals;
     pid_t	pid;
@@ -884,11 +1335,12 @@ int main(int ac, char **av)
     conf_init(g);
     parse_conf(g);
     check_paths(g);
-exit(0);
+
     if ((pid = fork()) == 0)
     {
 	int	max = getdtablesize(), errs = 0, fd;
 
+	write_pid(g);
 	fclose(stdin);	/* 0 */
 	fclose(stdout);	/* 1 */
 	fclose(stderr);	/* 2 */
@@ -902,22 +1354,38 @@ exit(0);
 	setsid();
 	chdir(g->SessDir);
 
-	signal(SIGHUP, trap_sig);
+	if (g->SigReload != SIGHUP && g->SigRotate != SIGHUP)
+	    signal(SIGHUP, SIG_IGN);
 	signal(SIGINT, SIG_IGN);
 	signal(SIGQUIT, SIG_IGN);
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGTERM, terminate);
-	signal(SIGTERM, trap_sig);
-	siginterrupt(SIGHUP, 1);
+	signal(g->SigReload, trap_sig);
+	signal(g->SigRotate, trap_sig);
 	siginterrupt(SIGTERM, 1);
-	setup_loop(g);
+	siginterrupt(g->SigReload, 1);
+	siginterrupt(g->SigRotate, 1);
+
+	fopen("/dev/null", "r");	/* daemon's stdin */
+	if (g->rep_path == NULL)
+	    fopen("/dev/null", "w");	/* daemon's stdout */
 
 	while (g->loop)
 	{
-	    time(&g->now);
-	    handle_children(g);
-	    handle_logs(g);
+	    if (g->sig == g->SigReload)
+	    {
+		parse_conf(g);
+		kill_children(g, g->SigReload);
+	    }
+	    else if (g->sig == g->SigRotate)
+		open_logs(g);
+	    else if (g->sig == SIGTERM)
+		kill_children(g, SIGTERM);
+
+	    handle_logs(g);		/* includes 1st opens */
+	    handle_children(g);		/* includes 1st forks */
 	}
+	unlink(g->pid_path);
     }
     else if (pid > 0)
 	printf("%s started (PID=%d)\n", g->prg, pid);

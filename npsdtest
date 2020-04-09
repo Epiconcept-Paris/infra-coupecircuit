@@ -1,0 +1,36 @@
+#!/bin/sh
+#
+#	npsdtest - nbphpsessd test
+#
+GotSig()
+{
+    # global Signal
+    local SIG
+
+    SIG=$(tr '[a-z]' '[A-Z]' <<<$1)
+    LogNote "Received SIG$SIG"
+    Signal=$1
+}
+
+SigTerm()
+{
+    GotSig Term
+}
+
+SigUsr1()
+{
+    GotSig Usr1
+}
+
+Signal=
+trap SigTerm TERM
+trap SigUsr1 USR1
+#
+#   Main
+#
+echo "Starting" >&2
+while test $Loop
+do
+    expr $RANDOM : '.*\([0-9][0-9]\)'
+    sleep 2
+done
