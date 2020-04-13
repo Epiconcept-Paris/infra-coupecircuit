@@ -55,6 +55,12 @@
 #define TL_CONF		1
 #define TL_EXEC		2
 
+/* global errors */
+#define ERR_CFG_NUM	1
+#define ERR_CFG_SIG	2
+#define ERR_CFG_FAC	3
+#define ERR_CFG_LVL	4
+
 #define NB_CHILDREN	2
 #if NB_CHILDREN != 2
 #error "This program is designed for 2 children"
@@ -139,6 +145,7 @@ typedef	struct	glob_s		/* global variables */
 
     char	*cfg_arg;
     char	*cfg_path;
+    int		cfgerr;
 
     char	*pid_path;
     bool	kill_prg;
@@ -543,7 +550,7 @@ void		get_cfgpath(glob_t *g)
 		bad = g->cfg_arg;;
 	}
 	if (bad != NULL)
-	    errexit(EX_CONF, 0, "cannot read config-file %s", bad);
+	    errexit(EX_CONF, 0, "cannot access config-file %s", bad);
 	g->cfg_arg = xfree(g->cfg_arg);
     }
     else
@@ -597,9 +604,12 @@ int		intv(glob_t *g, const char *s, int ln)
 	if (*p != '-' && (*p < '0' || *p > '9'))
 	{
 	    if (ln > 0)
-		errexit(EX_CONF, 0, "non-numeric character '%c' in value at line %d of %s", *p, ln, g->cfg_path);
+		warn("non-numeric character '%c' in value \"%s\" at line %d of %s", *p, s, ln, g->cfg_path);
 	    else
-		errexit(EX_CONF, 0, "non-numeric character '%c' in value \"%s\"", *p, s);
+		warn("non-numeric character '%c' in value \"%s\"", *p, s);
+
+	    g->cfgerr = ERR_CFG_NUM;
+	    return NUMIVAL;
 	}
 	p++;
     }
@@ -607,7 +617,6 @@ int		intv(glob_t *g, const char *s, int ln)
 }
 
 /*	Generic string to int conversion. Also returns list of valid strings. */
-
 int		stoi(sconvi_t *tbl, int sz, const char *s, char **help, char *sep)
 {
     int		i, nb;
@@ -618,7 +627,7 @@ int		stoi(sconvi_t *tbl, int sz, const char *s, char **help, char *sep)
 	    return tbl[i].val;
     }
 
-    /* Not founf: build help text for values */
+    /* Not found: build help text for values */
     *help = xmalloc(LOG_BUF_SIZE);	/* free: never (init) */
     nb = 0;
     for (i = 0; i < sz; i++)
@@ -631,28 +640,61 @@ int		stoi(sconvi_t *tbl, int sz, const char *s, char **help, char *sep)
 /*	Convert signal name to signal number */
 int		sigv(glob_t *g, const char *s, int ln)
 {
-    sconvi_t	tbl[] = {
-	{ "SIGHUP",	SIGHUP	},
-	{ "SIGUSR1",	SIGUSR1	},
-	{ "SIGUSR2",	SIGUSR2	},
+    static sconvi_t	tbl[] = {
 	{ "HUP",	SIGHUP	},
 	{ "USR1",	SIGUSR1	},
-	{ "USR2",	SIGUSR2	}
+	{ "USR2",	SIGUSR2	},
+	{ "SIGHUP",	SIGHUP	},
+	{ "SIGUSR1",	SIGUSR1	},
+	{ "SIGUSR2",	SIGUSR2	}
     };
     char	*help = NULL;
-    int		val;
+    int		val, i;
 
+    /*
+     *	Ugly hack (with sigstr()) to reverse convert number to name
+     */
+    if (*s == '\0')
+    {
+	for (i = 0; i < sizeof tbl / sizeof tbl[0]; i++)
+	{
+	    if (ln == tbl[i].val)
+	    {
+		/* ln is sig */
+		strcpy((char *)s, tbl[i].str);
+		return ln;	/* found */
+	    }
+	}
+	return NUMIVAL;
+    }
+
+    /*	Standard use */
     if ((val = stoi(tbl, sizeof tbl / sizeof tbl[0], s, &help, ", ")) != NUMIVAL)
 	return val;
-    errexit(EX_CONF, 0, "unknown signal name \"%s\" at line %d of %s\nKnown signal values: %s", s, ln, g->cfg_path, help);
+
+    g->cfgerr = ERR_CFG_SIG;
+    warn("unknown signal name \"%s\" at line %d of %s\nKnown signal values: %s", s, ln, g->cfg_path, help);
+
     return NUMIVAL;
 }
 
-/*	Convert syslog facility name to value  */
+/*	Ugly hack to convert signal number to signal name */
+char		*sigstr(glob_t *g, int sig)
+{
+    static char	def[16];
 
+    def[0] = '\0';
+    /* The uglyness of the hack appears in the mandatory cast below */
+    if (sigv(g, (const char *)&def, sig) != sig)
+	snprintf(def, sizeof def, "sig%d", sig);
+
+    return def;
+}
+
+/*	Convert syslog facility name to value  */
 int		facv(glob_t *g, const char *s, int ln)
 {
-    sconvi_t	tbl[] = {
+    static sconvi_t	tbl[] = {
 	{ "DAEMON",	LOG_DAEMON },
 	{ "LOCAL0",	LOG_LOCAL0 },
 	{ "LOCAL1",	LOG_LOCAL1 },
@@ -669,15 +711,17 @@ int		facv(glob_t *g, const char *s, int ln)
 
     if ((val = stoi(tbl, sizeof tbl / sizeof tbl[0], s, &help, ", ")) != NUMIVAL)
 	return val;
-    errexit(EX_CONF, 0, "unknown syslog facility \"%s\" at line %d of %s\nKnown facility values: %s", s, ln, g->cfg_path, help);
+
+    g->cfgerr = ERR_CFG_FAC;
+    warn("unknown syslog facility \"%s\" at line %d of %s\nKnown facility values: %s", s, ln, g->cfg_path, help);
+
     return NUMIVAL;
 }
 
 /*	Convert syslog level name to value  */
-
 int		lvlv(glob_t *g, const char *s, int ln)
 {
-    sconvi_t	tbl[] = {
+    static sconvi_t	tbl[] = {
 	{ "ALERT",	LOG_ALERT	},
 	{ "CRIT",	LOG_CRIT	},
 	{ "ERR",	LOG_ERR		},
@@ -693,14 +737,17 @@ int		lvlv(glob_t *g, const char *s, int ln)
 
     if ((val = stoi(tbl, sizeof tbl / sizeof tbl[0], s, &help, ", ")) != NUMIVAL)
 	return val;
-    errexit(EX_CONF, 0, "unknown syslog level \"%s\" at line %d of %s\nKnown level values: %s", s, ln, g->cfg_path, help);
+
+    g->cfgerr = ERR_CFG_LVL;
+    warn("unknown syslog level \"%s\" at line %d of %s\nKnown level values: %s", s, ln, g->cfg_path, help);
+
     return NUMIVAL;
 }
 
 /*
  *  Parse config file (called at init and config reloads)
  */
-void		parse_conf(glob_t *g)
+bool		parse_conf(glob_t *g)
 {
     regmatch_t	match[NB_CFGV_RESUBS], *mp = &match[1];
 #ifdef CFG_IVALS
@@ -716,7 +763,10 @@ void		parse_conf(glob_t *g)
 
     trace(TL_CONF, "reading config from %s", g->cfg_path);
     if ((buf = getfile(g->cfg_path)) == NULL)	/* free: before parse_conf() return */
-	errexit(EX_CONF, errno, "cannot read %s", g->cfg_path);
+    {
+	error(errno, "cannot read %s", g->cfg_path);
+	return false;
+    }
     p = strrchr(g->cfg_path, '/');
     strcpy(cfgfile, p == NULL ? g->cfg_path : p + 1);
     /* count lines */
@@ -727,7 +777,10 @@ void		parse_conf(glob_t *g)
 	    nl++;
     }
     if (nl == 0)
-	errexit(EX_CONF, 0, "config file %s has no newline characters ??", g->cfg_path);
+    {
+	error(0, "config file %s has no newline characters ??", g->cfg_path);
+	return false;
+    }
 
     /*
      *	Split file into a lines array
@@ -751,6 +804,10 @@ void		parse_conf(glob_t *g)
      *	Parse file into new values array 'nv'
      */
 #ifndef CFG_IVALS
+    /*
+     *  If CFG_IVALS (ConFiG Initial VALueS) is undefined,
+     *  initialize our nv array with these default values
+     */
     for (iv = 0; iv < NB_CFGVARS; iv++)
     {
 	if (g->config[iv].isint)
@@ -759,32 +816,42 @@ void		parse_conf(glob_t *g)
 	    nv[iv].s = STRIVAL;
     }
 #endif
+    /*
+     *  For every line in config-file
+     */
     for (ln = 0; ln < nl; ln++)
     {
+	/* Ignore empty or comment-only lines */
 	if (lines[ln][0] == '\0' || lines[ln][0] == '#')
-	    continue;	/* empty or comment line */
+	    continue;
 
 	/*
 	 *  Look for all known cfgvar names
+	 *  If var already defined earlier in file, tell it
 	 */
 	for (iv = 0; iv < NB_CFGVARS; iv++)
 	{
 	    vp = &g->config[iv];
-	    if ((err = regexec(&vp->regexp, lines[ln], NB_CFGV_RESUBS, match, 0)) == 0)
+	    if ((err = regexec(&vp->regexp, lines[ln], NB_CFGV_RESUBS, match, 0)) == 0)	/* Match ! */
 	    {
 		xasprintf(&p, "%.*s", mp->rm_eo - mp->rm_so, lines[ln] + mp->rm_so);	/* free: just below */
-		if (vp->isint)
+		if (vp->isint)	/* Integer value */
 		{
-		    n = vp->icv(g, p, ln);
-
+		    n = *p != '\0' ? vp->icv(g, p, ln) : NUMIVAL;	/* Call integer conversion */
+		    if (g->cfgerr  > 0)
+		    {
+			g->cfgerr = 0;
+			break;			/* match ok, but bad value */
+		    }
 		    xfree(p);	/* not needed for integer */
+
 		    if (nv[iv].i != NUMIVAL)
 			notice("in %s line %d, %s redefined: %d -> %d", cfgfile, 1 + ln, vp->name, nv[iv].i, n);
 		    else
 			trace(TL_CONF, "in %s line %d: %s = %d", cfgfile, 1 + ln, vp->name, n);
 		    nv[iv].i = n;
 		}
-		else
+		else		/* String value */
 		{
 		    if (nv[iv].s != STRIVAL)
 		    {
@@ -807,45 +874,59 @@ void		parse_conf(glob_t *g)
     xfree(buf);		/* from getfile() */
 
     /*
-     *	One last loop on cfgvars for updatable / defaults
+     *	Last, loop on cfgvars for updatable / defaults
      */
     for (iv = 0; iv < NB_CFGVARS; iv++)
     {
 	vp = &g->config[iv];
 	if (vp->isint)
 	{
+	    bool	upd = false;
+
 	    n = nv[iv].i != NUMIVAL ? nv[iv].i : vp->def.i;
 	    if (vp->val.i == NUMIVAL || vp->isupd)
+	    {
+		if (vp->val.i != NUMIVAL)	/* it's an update */
+		{
+		    if (n != vp->val.i)		/* value changed */
+		    {
+			;	/* nothing so far */
+		    }
+		}
 		vp->val.i = n;
-	    else if (nv[iv].i == NUMIVAL || vp->val.i != nv[iv].i)
-		notice("config %s will only be updated to %d at %s restart", vp->name, n, g->prg);
-	    trace(TL_CONF, "config['%s'] = %d", vp->name, vp->val.i);
+		upd = true;
+	    }
+	    else if (n != vp->val.i)
+		notice("config %s will only be updated from %d to %d at %s restart", vp->name, vp->val.i, n, g->prg);
+	    trace(TL_CONF, "config['%s'] %s= %d", vp->name, upd ? "" : "!", vp->val.i);
 	}
 	else
 	{
+	    bool	upd = false;
+
 	    p = nv[iv].s != STRIVAL ? nv[iv].s : vp->def.s;
 	    if (vp->val.s == STRIVAL || vp->isupd)
 	    {
-		if (vp->val.s != STRIVAL)
+		if (vp->val.s != STRIVAL)	/* it's an update */
 		{
-		    if (strcmp (vp->val.s, p) != 0)	/* value changed */
+		    if (strcmp(vp->val.s, p) != 0)	/* value changed */
 		    {
-			void	kill_children(glob_t *, int);
-
-			if (strcmp(vp->name, "sess_dir") == 0)
-			    kill_children(g, SIGTERM);
+			;	/* nothing so far */
 		    }
-		    xfree(vp->val.s);
+		    xfree(vp->val.s);		/* free the old value */
 		}
 		vp->val.s = xstrdup(p);
+		upd = true;
 	    }
-	    else if (nv[iv].s == STRIVAL || strcmp(vp->val.s, nv[iv].s) != 0)
-		notice("config %s will only be updated to \"%s\" at %s restart", vp->name, p, g->prg);
-	    trace(TL_CONF, "config['%s'] = \"%s\"", vp->name, vp->val.s);
+	    else if (strcmp(vp->val.s, p) != 0)
+		notice("config %s will only be updated from \"%s\" to \"%s\" at %s restart", vp->name, vp->val.s, p, g->prg);
+	    trace(TL_CONF, "config['%s'] %s= \"%s\"", vp->name, upd ? "" : "!", vp->val.s);
 	}
     }
     /* Propagate config value to globals */
     g->fork_delay = g->ChildDelay;
+
+    return true;
 }
 
 /*
@@ -910,7 +991,7 @@ void		config_help(glob_t *g)
     {
 	cfgvar_t*   vp;
 	char	    idef[32];
-	
+
 	vp = &g->config[i];
 	if (vp->isint)
 	    snprintf(idef, sizeof idef, "%d", vp->def.i);
@@ -933,7 +1014,7 @@ void		parse_args(glob_t *g, int ac, char **av)
 	if (realpath(av[0], real) == NULL)
 	{
 	    if ((exe = getfile(name)) == NULL)		/* free: just below */
-		errexit(EX_CONF, errno, "cannot read file %s ?", name);
+		errexit(EX_PATH, errno, "cannot read file %s ?", name);
 	    path = exe;
 	}
 	else
@@ -1260,7 +1341,7 @@ void		get_cldpaths(glob_t *g)
 		continue;
 	    }
 	}
-		
+
 	/* check arg in BinDir */
 	snprintf(path, sizeof path, "%s/%s", g->BinDir, file);
 	trace(TL_CONF, "trying path[%d] = %s", i, cp->path);
@@ -1438,9 +1519,14 @@ void		kill_children(glob_t *g, int sig)
 
 	if (cp->pid > 0 && cp->kill_time == 0)
 	{
-	    info("killing %s (PID=%d) with sig=%d", cp->name, cp->pid, sig);
+	    if (sig == SIGTERM)
+	    {
+		info("killing %s (PID=%d)", cp->name, cp->pid);
+		cp->kill_time = time(NULL);
+	    }
+	    else
+		info("sending SIG%s to %s (PID=%d)", sigstr(g, sig), cp->name, cp->pid);
 	    kill(cp->pid, sig);
-	    cp->kill_time = time(NULL);
 	}
     }
 }
@@ -1483,7 +1569,7 @@ void		bury_children(glob_t *g)
 		if (cp->pid > 0 && cp->kill_time == 0)
 		{
 		    /* TODO: should we use SIGHUP ? */
-		    info("killing peer %s (PID=%d) with SIGTERM", cp->name, cp->pid);
+		    info("killing peer %s (PID=%d)", cp->name, cp->pid);
 		    kill(cp->pid, SIGTERM);
 		    cp->kill_time = time(NULL);
 		}
@@ -1673,7 +1759,7 @@ void		handle_children(glob_t *g)
  */
 void 		trap_sig(int sig)
 {
-    info("received signal %d", sig);
+    info("received signal %s", sigstr(&globals, sig));
     globals.sig = sig;
 }
 
@@ -1692,7 +1778,8 @@ int		main(int ac, char **av)
     parse_args(g, ac, av);
     conf_init(g);
     get_cfgpath(g);
-    parse_conf(g);
+    if (!parse_conf(g))
+	return EX_CONF;
     check_pidfile(g);
 
     get_logpath(g);
@@ -1733,14 +1820,16 @@ int		main(int ac, char **av)
 
 	g->fp0 = fopen("/dev/null", "r");	/* daemon's fd0 */
 	open_logs(g);
+
 	if (g->rep_path != NULL)
 	{
 	    fprintf(g->rep_fp, "%s ================================================\n", tstamp(0, " "));
 	    fflush(g->rep_fp);
 	}
 	info("================================================");
-	info("Starting %s PID=%d", g->prg, getpid());
+	info("Starting %s PID=%d - Reload sig is %s", g->prg, getpid(), sigstr(g, g->SigReload));
 	trace(TL_EXEC, "rep=%s fd=%d log=%s fd=%d", g->rep_path != NULL ? g->rep_path : g->log_path, fileno(g->rep_fp), g->log_path, fileno(g->log_fp));
+
 	if (chdir(g->WorkDir) < 0)
 	    error(errno, "chdir %s", g->WorkDir);
 
@@ -1759,20 +1848,25 @@ int		main(int ac, char **av)
 
 	while (g->loop > 0)
 	{
-	    if (g->sig == g->SigReload)
-	    {
-		parse_conf(g);
-		kill_children(g, g->SigReload);
-	    }
-	    else if (g->sig == g->SigRotate)
-		open_logs(g);
-
-	    handle_logs(g);		/* includes 1st opens */
+	    handle_logs(g);		/* centralize logs */
 	    handle_children(g);		/* includes 1st forks */
-	    if (g->sig == SIGTERM)
-		kill_children(g, SIGTERM);
+
+	    if (g->sig > 0)
+	    {
+		if (g->sig == g->SigReload)
+		{
+		    parse_conf(g);
+		    kill_children(g, g->SigReload);
+		}
+		else if (g->sig == g->SigRotate)
+		    open_logs(g);
+		else if (g->sig == SIGTERM)
+		    kill_children(g, SIGTERM);
+
+		g->sig = 0;
+	    }
 	}
-	info("exit from main loop=%d", g->loop);
+	info("exit from main loop (=%d)", g->loop);
 	if (g->pid_path != NULL)	/* defensive coding :-) */
 	{
 	    info("removing %s", g->pid_path);
