@@ -6,7 +6,7 @@ Def='/etc/epiconcept'
 NSV='NB_SESSIONS_PHP'
 LAV='LOAD_AVG'
 
-cfgfile()
+CfgFile()
 {
     #global Pkg Prg Dir Def
     local f
@@ -18,13 +18,13 @@ cfgfile()
 	test -s "$Def/$f" && echo "$Def/$f" && return
     fi
     f="$Pkg.conf"
-	test -s "$Dir/$f" && echo "$Dir/$f" && return
-	test -s "$Def/$f" && echo "$Def/$f" && return
+    test -s "$Dir/$f" && echo "$Dir/$f" && return
+    test -s "$Def/$f" && echo "$Def/$f" && return
     echo "$Prg: cannot find configuration file" >&2
     exit 1
 }
 
-cfgvar()
+CfgVar()
 {
     #global Cfg
     local val
@@ -33,33 +33,34 @@ cfgvar()
     test "$val" && echo "$val" || echo "$2=\"$3\""
 }
 
-getcfg()
+GetCfg()
 {
     local Cfg
 
-    Cfg=`cfgfile`
-    test "$1" && echo "Reloading $Cfg" >&2
-    cfgvar report_url Url 'https://`hostname`.voozanoo.net/localapc'
-    cfgvar curl_timeout Cto '10'
-    cfgvar conf_reload_sig Rld USR1
+    Cfg=`CfgFile`
+    test "$1" && echo "Reloading $Cfg" >&2 || echo "Config from $Cfg" >&2
+    CfgVar conf_reload_sig Rld USR1
+    CfgVar report_url Url 'https://`hostname`.voozanoo.net/localapc'
+    CfgVar curl_timeout Cto 20
+    CfgVar report_freq Frq 5
 }
 
-gotsig()
+GotSig()
 {
     # global Sig
     echo "Received SIG$1" >&2
     Sig=$1
 }
 
-sigterm()
+SigTerm()
 {
-    gotsig TERM
+    GotSig TERM
 }
 
-sigrld()
+SigRld()
 {
     #global Rld
-    gotsig $Rld
+    GotSig $Rld
 }
 
 #
@@ -68,41 +69,55 @@ sigrld()
 Pkg=`basename $0 .sh`
 Prg=`basename $0`
 Dir=`dirname $0`
-eval `getcfg`
-#echo "Cfg=$Cfg Url=[$Url] Cto=$Cto Rld=$Rld"; exit 0
+expr "$Pkg" : '.*test$' >/dev/null && Dry=y	# Dry run mode (do not call curl)
 
-trap sigterm TERM
-trap sigrld $Rld
 if tty >/dev/null; then		# Interactive test mode
     schr='?'
     eof=`stty -a | sed -nr 's/^.* eof = ([^;]+);.*\$/\1/p'`
     echo "Enter (int)nb-sessions-php (or type $eof for end, $schr<cr> for status)"
 fi
+test "$schr" || echo "Starting $Prg" >&2
+
+eval `GetCfg`
+#echo "Cfg=$Cfg Rld=$Rld Url=[$Url] Cto=$Cto Frq=$Frq"; exit 0
+test "$Dry" && echo "Dry-run mode (curl not called)" >&2
+
+trap SigTerm TERM
+trap SigRld $Rld
 #
 #   Main loop
 #
-test "$schr" || echo "Starting $Prg" >&2
 sleep 1
 while :
 do
     if [ "$Sig" = "$Rld" ]; then
 	oRld="$Rld"
-	eval `getcfg y`
-	test "$Rld" = "$oRld" || echo "ignoring conf_reload_sig=$Rld until next restart" >&2
-	Rld="$oRld"
+	eval `GetCfg y`
+	if [ "$Rld" != "$oRld" ]; then
+	    trap $oRld
+	    trap SigRld $Rld
+	    echo "Config-reload signal changed from $oRld to $Rld" >&2
+	fi
 	Sig=
     fi
+    Nxt=$(expr $(date '+%s') + 1)
     while read nb
     do
 	test "$Sig" && break
 	test "$nb" || continue
 	if [ "$schr" -a "$nb" = "$schr" ]; then
-	    echo "curl -s \"$Url?$NSV&$LAV\" =>"
+	    echo "curl -m $Cto -s \"$Url?$NSV&$LAV\" =>"
 	    curl -m $Cto -s "$Url?$NSV&$LAV" | sed 's/^/  > /'
 	else
-	    la=`uptime | sed -e 's/^.* load average: //' -e 's/, /;/g'`
-	    #echo "URL=[$Url?$NSV=$nb&$LAV=$la]"
-	    curl -m $Cto "$Url?$NSV=$nb&$LAV=$la"
+	    Now=`date '+%s'`
+	    if [ "$Now" -le "$Nxt" ]; then
+		la=`uptime | sed -e 's/^.* load average: //' -e 's/, /;/g'`
+		echo "NbSess=$nb LdAvg=\"$la\""
+		test "$Dry" || curl -m $Cto -s "$Url?$NSV=$nb&$LAV=$la"
+	    elif [ -z "$schr" ]; then
+		echo "Skipped curl as we are `expr $Now - $Nxt` second(s) late" >&2
+	    fi
+	    Nxt=`expr $Now + $Frq`
 	fi
     done
     test "$Sig" = 'TERM' && break

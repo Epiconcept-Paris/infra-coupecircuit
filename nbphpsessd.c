@@ -34,8 +34,6 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#if 0
-#endif
 
 /* Exit codes */
 #define EX_OK		0
@@ -103,6 +101,7 @@ typedef struct	cfgvar_s	/* configuration variables */
     int		(*icv)(struct glob_s *, const char *, int);	/* function to convert to int */
     cfgval_t	val;		/* value */
     cfgval_t	def;		/* default */
+    int		line;		/* line in file where defined, 0 if default */
     regex_t	regexp;		/* compiled regexp for config parsing */
     char	*help;
 }		cfgvar_t;
@@ -173,6 +172,7 @@ glob_t		globals = {
 	 *	  - add default values to the CFG_IVALS macro below
 	 */
 #	define TlvConv		config[0].icv
+
 #	define TraceLevel	config[0].val.i
 #	define BinDir		config[1].val.s
 #	define LogDir		config[2].val.s
@@ -182,10 +182,23 @@ glob_t		globals = {
 #	define ChildLinger	config[6].val.i
 #	define ChildDelay	config[7].val.i
 #	define ChildRetries	config[8].val.i
-#	define SigReload	config[9].val.i
-#	define SigRotate	config[10].val.i
-#	define SyslogFac	config[11].val.i
-#	define SyslogLvl	config[12].val.i
+#	define SyslogFac	config[9].val.i
+#	define SyslogLvl	config[10].val.i
+#	define SigReload	config[11].val.i
+#	define SigRotate	config[12].val.i
+
+#	define VarReload	config[11].name
+#	define VarRotate	config[12].name
+
+#	define DefReload	config[11].def.i
+#	define DefRotate	config[12].def.i
+
+#	define RefReload	config[11].line
+#	define RefRotate	config[12].line
+
+#	define ValReload(v)	v[11].i
+#	define ValRotate(v)	v[12].i
+
 #	define CFG_IVALS	{ \
 	{.i=NUMIVAL},\
 	{.s=STRIVAL}, {.s=STRIVAL}, {.s=STRIVAL}, {.s=STRIVAL},\
@@ -193,32 +206,32 @@ glob_t		globals = {
 	{.i=NUMIVAL}, {.i=NUMIVAL}, {.i=NUMIVAL}, {.i=NUMIVAL} \
     }
     {
-	{ "dtrace_level",	1, 1, intv, { .i = NUMIVAL },	{ .i = 0 },		{},
+	{ "dtrace_level",	1, 1, intv, { .i = NUMIVAL },	{ .i = 0 },		0, {},
 				"trace level (can be verbose !)" },
-	{ "bin_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/usr/local/lib/%s" },	{},
+	{ "bin_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/usr/local/lib/%s" },	0, {},
 				"where to find binaries if nowhere else" },
-	{ "log_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/var/log/%s" },	{},
+	{ "log_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/var/log/%s" },	0, {},
 				"where to put log-file if not -l" },
-	{ "run_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/run/%s" },	{},
+	{ "run_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/run/%s" },	0, {},
 				"where to put pid-file" },
-	{ "work_dir",		1, 0, NULL, { .s = STRIVAL },	{ .s = "/usr/local/lib/%s" }, {},
+	{ "work_dir",		1, 0, NULL, { .s = STRIVAL },	{ .s = "/usr/local/lib/%s" }, 0, {},
 				"working directory" },
-	{ "log_wait",		1, 1, intv, { .i = NUMIVAL },	{ .i = 5 },		{},
+	{ "log_wait",		1, 1, intv, { .i = NUMIVAL },	{ .i = 5 },		0, {},
 				"how long max to wait for logs in loop" },
-	{ "child_linger",	1, 1, intv, { .i = NUMIVAL },	{ .i = 10 },		{},
+	{ "child_linger",	1, 1, intv, { .i = NUMIVAL },	{ .i = 10 },		0, {},
 				"delay between SIGTERM and SIGKILL for children" },
-	{ "child_delay",	1, 1, intv, { .i = NUMIVAL },	{ .i = FORK_DELAY },	{},
+	{ "child_delay",	1, 1, intv, { .i = NUMIVAL },	{ .i = FORK_DELAY },	0, {},
 				"delay between consecutive forks of children" },
-	{ "child_retries",	1, 1, intv, { .i = NUMIVAL },	{ .i = 10 },		{},
+	{ "child_retries",	1, 1, intv, { .i = NUMIVAL },	{ .i = 10 },		0, {},
 				"maximum number of fork retries" },
-	{ "conf_reload_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR1 },	{},
-				"conf-reload signal (SIGxxx also accepted)" },
-	{ "log_rotate_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR2 },	{},
-				"log-rotate signal (SIGxxx also accepted)" },
-	{ "syslog_facility",	1, 1, facv, { .i = NUMIVAL },	{ .i = LOG_LOCAL0 },	{},
+	{ "syslog_facility",	1, 1, facv, { .i = NUMIVAL },	{ .i = LOG_LOCAL0 },	0, {},
 				"syslog facility if cannot rotate log" },
-	{ "syslog_level",	1, 1, lvlv, { .i = NUMIVAL },	{ .i = LOG_CRIT },	{},
-				"syslog level if cannot rotate log" }
+	{ "syslog_level",	1, 1, lvlv, { .i = NUMIVAL },	{ .i = LOG_CRIT },	0, {},
+				"syslog level if cannot rotate log" },
+	{ "conf_reload_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR1 },	0, {},
+				"conf-reload signal (SIGxxx also accepted)" },
+	{ "log_rotate_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR2 },	0, {},
+				"log-rotate signal (SIGxxx also accepted)" }
     }
 };
 
@@ -412,6 +425,16 @@ char		*getfile(char *path)
 }
 
 /*
+ *  Return basename of a path, or path itself if no '/' in it
+ */
+char		*base_name(char *path)
+{
+    char	*p = strrchr(path, '/');
+
+    return p == NULL ? path : p + 1;
+}
+
+/*
  * ====	Process utilities ==============================================
  */
 pid_t		dead_wait(char *reason)
@@ -587,7 +610,8 @@ void		get_cfgpath(glob_t *g)
 	set_cfg_env(g, env_var);
 	return;
     }
-    errexit(EX_CONF, 0, "cannot find config-file %s.conf in args, env, %s or in " CFG_DEFDIR, g->pkg, g->prg_dir);
+    errexit(EX_CONF, 0, "cannot find config-file %s.conf in args, env, %s or in " CFG_DEFDIR,
+	g->pkg, g->prg_dir);
 }
 
 /*
@@ -640,13 +664,14 @@ int		stoi(sconvi_t *tbl, int sz, const char *s, char **help, char *sep)
 /*	Convert signal name to signal number */
 int		sigv(glob_t *g, const char *s, int ln)
 {
+    /* If you change this table, also update apply_conf()'s array */
     static sconvi_t	tbl[] = {
-	{ "HUP",	SIGHUP	},
 	{ "USR1",	SIGUSR1	},
 	{ "USR2",	SIGUSR2	},
-	{ "SIGHUP",	SIGHUP	},
+	{ "HUP",	SIGHUP	},
 	{ "SIGUSR1",	SIGUSR1	},
-	{ "SIGUSR2",	SIGUSR2	}
+	{ "SIGUSR2",	SIGUSR2	},
+	{ "SIGHUP",	SIGHUP	}
     };
     char	*help = NULL;
     int		val, i;
@@ -673,7 +698,8 @@ int		sigv(glob_t *g, const char *s, int ln)
 	return val;
 
     g->cfgerr = ERR_CFG_SIG;
-    warn("unknown signal name \"%s\" at line %d of %s\nKnown signal values: %s", s, ln, g->cfg_path, help);
+    warn("unknown signal name \"%s\" at line %d of %s\nKnown signal values: %s",
+	s, ln, g->cfg_path, help);
 
     return NUMIVAL;
 }
@@ -713,7 +739,8 @@ int		facv(glob_t *g, const char *s, int ln)
 	return val;
 
     g->cfgerr = ERR_CFG_FAC;
-    warn("unknown syslog facility \"%s\" at line %d of %s\nKnown facility values: %s", s, ln, g->cfg_path, help);
+    warn("unknown syslog facility \"%s\" at line %d of %s\nKnown facility values: %s",
+	s, ln, g->cfg_path, help);
 
     return NUMIVAL;
 }
@@ -739,7 +766,8 @@ int		lvlv(glob_t *g, const char *s, int ln)
 	return val;
 
     g->cfgerr = ERR_CFG_LVL;
-    warn("unknown syslog level \"%s\" at line %d of %s\nKnown level values: %s", s, ln, g->cfg_path, help);
+    warn("unknown syslog level \"%s\" at line %d of %s\nKnown level values: %s",
+	s, ln, g->cfg_path, help);
 
     return NUMIVAL;
 }
@@ -747,7 +775,7 @@ int		lvlv(glob_t *g, const char *s, int ln)
 /*
  *  Parse config file (called at init and config reloads)
  */
-bool		parse_conf(glob_t *g)
+bool		parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *))
 {
     regmatch_t	match[NB_CFGV_RESUBS], *mp = &match[1];
 #ifdef CFG_IVALS
@@ -767,8 +795,8 @@ bool		parse_conf(glob_t *g)
 	error(errno, "cannot read %s", g->cfg_path);
 	return false;
     }
-    p = strrchr(g->cfg_path, '/');
-    strcpy(cfgfile, p == NULL ? g->cfg_path : p + 1);
+    strcpy(cfgfile, base_name(g->cfg_path));
+
     /* count lines */
     nl = 0;
     for (p = buf; *p != '\0'; p++)
@@ -841,37 +869,51 @@ bool		parse_conf(glob_t *g)
 		    if (g->cfgerr  > 0)
 		    {
 			g->cfgerr = 0;
-			break;			/* match ok, but bad value */
+			break;		/* match ok, but bad value: move to next line  */
 		    }
 		    xfree(p);	/* not needed for integer */
 
 		    if (nv[iv].i != NUMIVAL)
-			notice("in %s line %d, %s redefined: %d -> %d", cfgfile, 1 + ln, vp->name, nv[iv].i, n);
+			notice("in %s line %d, %s redefined: %d -> %d",
+			    cfgfile, 1 + ln, vp->name, nv[iv].i, n);
 		    else
 			trace(TL_CONF, "in %s line %d: %s = %d", cfgfile, 1 + ln, vp->name, n);
+
+		    vp->line = ln;
 		    nv[iv].i = n;
 		}
 		else		/* String value */
 		{
 		    if (nv[iv].s != STRIVAL)
 		    {
-			notice("in %s line %d, %s redefined: \"%s\" -> \"%s\"", cfgfile, 1 + ln, vp->name, nv[iv].s, p);
+			notice("in %s line %d, %s redefined: \"%s\" -> \"%s\"",
+			    cfgfile, 1 + ln, vp->name, nv[iv].s, p);
 			xfree(nv[iv].s);	/* free: defined again */
 		    }
 		    else
 			trace(TL_CONF, "in %s line %d: %s = \"%s\"", cfgfile, 1 + ln, vp->name, p);
+
+		    vp->line = ln;
 		    nv[iv].s = p;
 		}
 		break;	/* Found */
 	    }
 	    else if (err != REG_NOMATCH)
-		warn("parse error in %s line %d for %s: %s", cfgfile, 1 + ln, vp->name, re_err(&vp->regexp, err));
+		warn("parse error in %s line %d for %s: %s",
+		    cfgfile, 1 + ln, vp->name, re_err(&vp->regexp, err));
 	}
 	if (iv >= NB_CFGVARS)
 	    trace(TL_CONF, "no match in %s line %d \"%s\"", cfgfile, 1 + ln, lines[ln]);
     }
     xfree(lines);
     xfree(buf);		/* from getfile() */
+
+    /*
+     *	Call our apply function, which can access
+     *	both the old and the new config values
+     */
+    if (apply != NULL && apply(g, nv) < 0)
+	return false;
 
     /*
      *	Last, loop on cfgvars for updatable / defaults
@@ -886,18 +928,23 @@ bool		parse_conf(glob_t *g)
 	    n = nv[iv].i != NUMIVAL ? nv[iv].i : vp->def.i;
 	    if (vp->val.i == NUMIVAL || vp->isupd)
 	    {
+#if 0
 		if (vp->val.i != NUMIVAL)	/* it's an update */
 		{
 		    if (n != vp->val.i)		/* value changed */
 		    {
-			;	/* nothing so far */
+			;	/* do what would be needed */
 		    }
 		}
+#endif
 		vp->val.i = n;
 		upd = true;
 	    }
 	    else if (n != vp->val.i)
-		notice("config %s will only be updated from %d to %d at %s restart", vp->name, vp->val.i, n, g->prg);
+		notice("config %s will only be updated from %d to %d at %s restart",
+		    vp->name, vp->val.i, n, g->prg);
+
+	    /* will show old (and kept) value if not set */
 	    trace(TL_CONF, "config['%s'] %s= %d", vp->name, upd ? "" : "!", vp->val.i);
 	}
 	else
@@ -909,23 +956,25 @@ bool		parse_conf(glob_t *g)
 	    {
 		if (vp->val.s != STRIVAL)	/* it's an update */
 		{
+#if 0
 		    if (strcmp(vp->val.s, p) != 0)	/* value changed */
 		    {
-			;	/* nothing so far */
+			;	/* do what would be needed */
 		    }
+#endif
 		    xfree(vp->val.s);		/* free the old value */
 		}
 		vp->val.s = xstrdup(p);
 		upd = true;
 	    }
 	    else if (strcmp(vp->val.s, p) != 0)
-		notice("config %s will only be updated from \"%s\" to \"%s\" at %s restart", vp->name, vp->val.s, p, g->prg);
+		notice("config %s will only be updated from \"%s\" to \"%s\" at %s restart",
+		    vp->name, vp->val.s, p, g->prg);
+
+	    /* will show old (and kept) value if not set */
 	    trace(TL_CONF, "config['%s'] %s= \"%s\"", vp->name, upd ? "" : "!", vp->val.s);
 	}
     }
-    /* Propagate config value to globals */
-    g->fork_delay = g->ChildDelay;
-
     return true;
 }
 
@@ -1045,6 +1094,8 @@ void		parse_args(glob_t *g, int ac, char **av)
 	    case 'l':	g->log_arg = xstrdup(optarg);	break;	/* free: in get_logpath() */
 	    case 'r':	g->rep_arg = xstrdup(optarg);	break;	/* free: in get_reppath() */
 	    case 't':	g->TraceLevel = g->TlvConv(g, optarg, 0);	break;
+
+	    /* Interactive */
 	    case 'k':	g->kill_prg = true;	break;
 	    case 'c':	config_help(g);		break;
 	    case 'h':	argerr = -1;		break;
@@ -1311,10 +1362,7 @@ void		get_cldpaths(glob_t *g)
     {
 	child_t	*cp = &g->children[i];
 
-	if ((file = strrchr(cp->arg, '/')) != NULL)
-	    file++;
-	else
-	    file = cp->arg;
+	file = base_name(cp->arg);
 
 	/* arg is absolute path: check */
 	if (cp->arg[0] == '/')	/* Absolute args */
@@ -1438,7 +1486,8 @@ void		get_put_log(FILE **from, FILE *to, char *name, char *tag)
 	in = strlen(buf);
 	out = fprintf(to, "%s %s %s: %s", tstamp(0, " "), name, tag, buf);
 	fflush(to);
-	trace(TL_EXEC, "from %d bytes on fd=%d to %d bytes on fd=%d", in, fileno(*from), out, fileno(to));
+	trace(TL_EXEC, "from %d bytes on fd=%d to %d bytes on fd=%d",
+	    in, fileno(*from), out, fileno(to));
 	return;
     }
 
@@ -1619,7 +1668,8 @@ void		handle_children(glob_t *g)
 	    errexit(EX_FORK, 0, "CRITICAL: aborting after %d burst-forks of children processes", g->ChildRetries);
 	if (t < (g->fork_time + g->fork_delay))
 	{
-	    trace(TL_EXEC, "waiting another %d seconds before forking again", (g->fork_time + g->fork_delay) - t);
+	    trace(TL_EXEC, "waiting another %d seconds before forking again",
+		(g->fork_time + g->fork_delay) - t);
 	    return;
 	}
 	if (g->fork_tries == (g->ChildRetries / 2))
@@ -1647,7 +1697,8 @@ void		handle_children(glob_t *g)
 	    trace(TL_EXEC, "pipe%d:r=%d,w=%d", i, pipes[2*i], pipes[(2*i)+1]);
     }
 
-    trace(TL_EXEC, "starting our %d children: %s -> %s", NB_CHILDREN, g->children[0].name, g->children[1].name);
+    trace(TL_EXEC, "starting our %d children: %s -> %s",
+	NB_CHILDREN, g->children[0].name, g->children[1].name);
     g->fork_time = time(NULL);
     /*
      *  Welcome to the world of multi-process programming !
@@ -1716,13 +1767,14 @@ void		handle_children(glob_t *g)
 	    }
 	}
 	execl(cp->path, cp->path, NULL);
-	log_sys(g, "cannot exec %s: %s (errno=%d), exiting with code=%d", cp->path, strerror(errno), errno, EX_EXEC);
+	log_sys(g, "cannot exec %s: %s (errno=%d), exiting with code=%d",
+	    cp->path, strerror(errno), errno, EX_EXEC);
 	exit(EX_EXEC);
     }
 
     /*
-     *	Now that all our chilren have gone to live their own life,
-     *  back to ours: let's care of our own stuff :-)
+     *	Now that all our chilren have gone to live
+     *	their own life, let's care of our own :-)
      */
     for (i = 0; i < NB_CHILDREN; i++)
     {
@@ -1763,6 +1815,112 @@ void 		trap_sig(int sig)
     globals.sig = sig;
 }
 
+/*
+ *  Three tasks in this function:
+ *	1: on parse_conf at init, check config values
+ *	2: after daemon fork (nv = NULL), apply config values
+ *	3: on parse_conf at config-reload, update config values
+ */
+int		apply_conf(glob_t *g, cfgval_t *nv)
+{
+    /* If you change this array, also update sigv()'s table */
+    struct trap {
+	int	sig;
+	void	(*def)(int);
+    } 		traps[] = {
+			{ SIGHUP,  SIG_IGN },
+			{ SIGUSR1, SIG_DFL },
+			{ SIGUSR2, SIG_DFL }
+    };
+    int		i, newRld, newRot;
+
+    /*
+     *	Propagate config value to globals
+     */
+    g->fork_delay = g->ChildDelay;
+    if (g->kill_prg)
+	return 0;
+
+    /*
+     *	Handle Reload and Rotate signals setup/update
+     */
+    if (nv != NULL)	/* task 1 or 3 */
+    {
+	newRld = ValReload(nv) != NUMIVAL ? ValReload(nv) : g->DefReload;
+	newRot = ValRotate(nv) != NUMIVAL ? ValRotate(nv) : g->DefRotate;
+
+	/* Check if new values will be equal */
+	if (newRld == newRot)	/* config error: same sigs ! */
+	{
+	    char    refRld[32], refRot[32], oldRld[16], oldRot[16];
+
+	    if (g->RefReload > 0)
+		snprintf(refRld, sizeof refRld, "line %d", g->RefReload);
+	    else
+		strcpy(refRld, "default");
+	    if (g->RefRotate > 0)
+		snprintf(refRot, sizeof refRot, "line %d", g->RefRotate);
+	    else
+		strcpy(refRot, "default");
+
+	    if (g->SigReload == NUMIVAL)	/* Then SigRotate is also (init) */
+	        errexit(EX_CONF, 0, "in file %s, %s (%s) and %s (%s) cannot have the same value %s",
+		    g->cfg_path, g->VarReload, refRld, g->VarRotate, refRot, sigstr(g, newRld));
+
+	    /* update */
+	    strcpy(oldRld, sigstr(g, g->SigReload));
+	    strcpy(oldRot, sigstr(g, g->SigRotate));
+	    warn("%s (%s) and %s (%s) have the same value %s in new config !\n"
+		"Keeping the old %s=%s and %s=%s",
+		g->VarReload, refRld, g->VarRotate, refRot, sigstr(g, newRld),
+		g->VarReload, oldRld, g->VarRotate, oldRot);
+	    return -1;
+	}
+	if (g->SigReload == NUMIVAL)	/* task 1 check completed */
+	    return 0;
+
+	/* task 3: apply update */
+	if ((newRld == g->SigReload && newRot == g->SigRotate) ||
+	    (newRld == g->SigRotate && newRot == g->SigReload))
+		return 0;	/* No change needed in sig setup */
+
+	/*  If newRld was not already setup, set it up */
+	if (newRld != g->SigReload && newRld != g->SigRotate)
+	{
+	    signal(newRld, trap_sig);
+	    siginterrupt(newRld, 1);
+	}
+	/*  If newRot was not already setup, set it up */
+	if (newRot != g->SigRotate && newRot != g->SigReload)
+	{
+	    signal(newRot, trap_sig);
+	    siginterrupt(newRot, 1);
+	}
+	/* Set any other sig back to default */
+	for (i = 0; i < sizeof traps / sizeof(struct trap); i++)
+	{
+	    if (traps[i].sig != newRld && traps[i].sig != newRot)
+	    {
+		signal(traps[i].sig, traps[i].def);
+		siginterrupt(traps[i].sig, 0);
+	    }
+	}
+	return 0;
+    }
+    /* task 2: apply setup */
+    for (i = 0; i < sizeof traps / sizeof(struct trap); i++)
+    {
+	if (traps[i].sig != g->SigReload && traps[i].sig != g->SigRotate)
+	    signal(traps[i].sig, traps[i].def);
+    }
+    signal(g->SigReload, trap_sig);
+    signal(g->SigRotate, trap_sig);
+    siginterrupt(g->SigReload, 1);
+    siginterrupt(g->SigRotate, 1);
+
+    return 0;
+}
+
 void 		terminate(int sig)
 {
     info("received SIGTERM");
@@ -1778,7 +1936,7 @@ int		main(int ac, char **av)
     parse_args(g, ac, av);
     conf_init(g);
     get_cfgpath(g);
-    if (!parse_conf(g))
+    if (!parse_conf(g, apply_conf))
 	return EX_CONF;
     check_pidfile(g);
 
@@ -1828,22 +1986,19 @@ int		main(int ac, char **av)
 	}
 	info("================================================");
 	info("Starting %s PID=%d - Reload sig is %s", g->prg, getpid(), sigstr(g, g->SigReload));
-	trace(TL_EXEC, "rep=%s fd=%d log=%s fd=%d", g->rep_path != NULL ? g->rep_path : g->log_path, fileno(g->rep_fp), g->log_path, fileno(g->log_fp));
+	trace(TL_EXEC, "rep=%s fd=%d log=%s fd=%d",
+	    g->rep_path != NULL ? g->rep_path : g->log_path,
+	    fileno(g->rep_fp), g->log_path, fileno(g->log_fp));
 
 	if (chdir(g->WorkDir) < 0)
 	    error(errno, "chdir %s", g->WorkDir);
 
-	if (g->SigReload != SIGHUP && g->SigRotate != SIGHUP)
-	    signal(SIGHUP, SIG_IGN);
 	signal(SIGINT, SIG_IGN);
 	signal(SIGQUIT, SIG_IGN);
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGTERM, terminate);
-	signal(g->SigReload, trap_sig);
-	signal(g->SigRotate, trap_sig);
 	siginterrupt(SIGTERM, 1);
-	siginterrupt(g->SigReload, 1);
-	siginterrupt(g->SigRotate, 1);
+	apply_conf(g, NULL);
 	g->loop = 1;
 
 	while (g->loop > 0)
@@ -1855,11 +2010,18 @@ int		main(int ac, char **av)
 	    {
 		if (g->sig == g->SigReload)
 		{
-		    parse_conf(g);
-		    kill_children(g, g->SigReload);
+		    int	old_reload = g->SigReload;
+
+		    if (parse_conf(g, apply_conf))
+			kill_children(g, old_reload);
 		}
 		else if (g->sig == g->SigRotate)
+		{
 		    open_logs(g);
+		    trace(TL_EXEC, "rep=%s fd=%d log=%s fd=%d",
+			g->rep_path != NULL ? g->rep_path : g->log_path,
+			fileno(g->rep_fp), g->log_path, fileno(g->log_fp));
+		}
 		else if (g->sig == SIGTERM)
 		    kill_children(g, SIGTERM);
 

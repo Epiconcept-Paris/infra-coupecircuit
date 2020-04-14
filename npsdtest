@@ -1,36 +1,87 @@
 #!/bin/sh
 #
-#	npsdtest - nbphpsessd test
+#	npsdtest - nbphpsessd fake counter for daemon tests
 #
+CfgFile()
+{
+    #global Prg Dir Def
+    local f
+
+    if [ "$NBPHPSESS_CONF" ]; then
+	f="$NBPHPSESS_CONF"
+	test -s "$f" && expr "$f" : / >/dev/null && echo "$f" && return
+	test -s "$Dir/$f" && echo "$Dir/$f" && return
+	test -s "$Def/$f" && echo "$Def/$f" && return
+    fi
+    f="$Prg.conf"
+    test -s "$Dir/$f" && echo "$Dir/$f" && return
+    test -s "$Def/$f" && echo "$Def/$f" && return
+    echo "$Prg: cannot find configuration file" >&2
+    exit 1
+}
+
+CfgVar()
+{
+    #global Cfg
+    local val
+
+    val=`sed -nr -e 's/\s*#.*$//' -e "s/^\\s*$1\\s*=\\s*(\\S+)/$2=\"\\1\"/p" $Cfg`
+    test "$val" && echo "$val" || echo "$2=\"$3\""
+}
+
+GetCfg()
+{
+    local Cfg
+
+    Cfg=`CfgFile`
+    test "$1" && echo "Reloading $Cfg" >&2 || echo "Config from $Cfg" >&2
+    CfgVar conf_reload_sig Rld USR1
+}
+
 GotSig()
 {
-    # global Signal
-    local SIG
-
-    SIG=$(tr '[a-z]' '[A-Z]' <<<$1)
-    LogNote "Received SIG$SIG"
-    Signal=$1
+    # global Sig
+    echo "Received SIG$1" >&2
+    Sig=$1
 }
 
 SigTerm()
 {
-    GotSig Term
+    GotSig TERM
 }
 
-SigUsr1()
+SigRld()
 {
-    GotSig Usr1
+    #global Rld
+    GotSig $Rld
 }
 
-Signal=
+#
+#   Init
+#
+Prg=`basename $0`
+Dir=`dirname $0`
+echo "Starting $Prg" >&2
+eval `GetCfg`
+
 trap SigTerm TERM
-trap SigUsr1 USR1
+trap SigRld $Rld
 #
 #   Main
 #
-echo "Starting" >&2
-while test $Loop
+while :
 do
-    expr $RANDOM : '.*\([0-9][0-9]\)'
+    if [ "$Sig" = "$Rld" ]; then
+	oRld="$Rld"
+	eval `GetCfg y`
+	if [ "$Rld" != "$oRld" ]; then
+	    trap $oRld
+	    trap SigRld $Rld
+	    echo "Config-reload signal changed from $oRld to $Rld" >&2
+	fi
+	Sig=
+    fi
+    expr $(expr $(bash -c 'echo $RANDOM') : '.*\([0-9][0-9]\)') / 3
     sleep 2
+    test "$Sig" = 'TERM' && break
 done
