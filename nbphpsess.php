@@ -4,15 +4,14 @@ $vars = [
 	[ 'name' => 'LOAD_AVG',			'ttl' => 30 ],
 	[ 'name' => 'NB_SESSIONS_PHP',		'ttl' => 30 ],
 	[ 'name' => 'COUPURE_CHARGE_SERVEUR',	'ttl' => 0 ],
-]; 
+];
 
 $nbv = count($vars);
 $out = array();
 $fmt = '';
-foreach ($_GET as $key => $val)
-{
+foreach ($_GET as $key => $val) {
 	if ($key == 'fmt' && $val == 'json')
-	$fmt = 'json';
+		$fmt = 'json';
 }
 
 foreach ($_GET as $key => $val) {
@@ -21,23 +20,27 @@ foreach ($_GET as $key => $val) {
 	for ($i = 0; $i < $nbv; $i++) {
 		if ($key == $vars[$i]['name'])
 			break;
-		}
+	}
 	if ($i < $nbv) {
 		if (empty($val) && $val !== '0')	// get
 		{
 			if (function_exists('apc_fetch'))
-			$apc = apc_fetch($key);
+				$apc = apc_fetch($key);
 			elseif (function_exists('apcu_fetch'))
-			$apc = apcu_fetch($key);
-			$out[$key] = preg_replace('/\D/', '', $apc) == $apc ? intval($apc) : $apc;
+				$apc = apcu_fetch($key);
+			if (gettype($apc) == 'string')
+			    $out[$key] = preg_replace('/\D/', '', $apc) == $apc ? intval($apc) : $apc;
+			else if (gettype($apc) == 'array')
+			    $out[$key] = $fmt == 'json' ? $apc : implode(';',$apc);
 		}
 		else			// set
 		{
-			if($val === 'set' && $key ===  'LOAD_AVG') $val = sys_getloadavg();
+			if ($key ===  'LOAD_AVG')
+				$val = $val === 'php' ? sys_getloadavg() : explode(';',$val);
 			if (function_exists('apc_store'))
-			apc_store($key, $val, $vars[$i]['ttl']);
+				apc_store($key, $val, $vars[$i]['ttl']);
 			elseif (function_exists('apcu_store'))
-			apcu_store($key, $val, $vars[$i]['ttl']);
+				apcu_store($key, $val, $vars[$i]['ttl']);
 		}
 	}
 }
