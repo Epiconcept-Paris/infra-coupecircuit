@@ -1,7 +1,7 @@
 #
 #	Makefile for nbphpsessd? binaries
 #
-BINS = nbphpsessd nbphpsess sesswatch
+BINS = nbphpsessd nbphpsess
 
 CFLAGS	= -Wall -ggdb -o -fsanitize=address -fno-omit-frame-pointer
 #CFLAGS	= -O -Wall

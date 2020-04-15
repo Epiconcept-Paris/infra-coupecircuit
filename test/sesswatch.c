@@ -454,7 +454,7 @@ void		get_cfgpath(glob_t *g)
 	g->cfg_path = xstrdup(path);	/* free: never (init 3) */
 	return;
     }
-    errexit(EX_CONF, 0, "cannot find config-file %s.conf in env, %s or in" CFG_DEFDIR, g->prg, g->prg_dir);
+    errexit(EX_CONF, 0, "cannot find config-file %s.conf in env, %s or in " CFG_DEFDIR, g->prg, g->prg_dir);
 }
 
 /*
@@ -901,8 +901,6 @@ int main(int ac, char **av)
 
     if (g->SigReload != SIGHUP)
 	signal(SIGHUP, SIG_IGN);
-    signal(SIGINT, SIG_IGN);
-    signal(SIGQUIT, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, terminate);
     signal(g->SigReload, trap_sig);
