@@ -381,9 +381,9 @@ char		*getfile(char *path, int *plen)
 	    big = xmalloc(len + 1);
 	    memcpy(big, buf, len);
 	}
-	if (memchr(big, '\0', len) != NULL)
+	if (plen != NULL && memchr(big, '\0', len) != NULL)
 	    warn("file \"%s\" contains NUL(s)", path);
-	buf[len] = '\0';
+	big[len] = '\0';
 	if (plen != NULL)
 	    *plen = len;
 	return big;
@@ -894,14 +894,30 @@ int		find_session(glob_t *g, char *name)
 
 bool		active_session(glob_t *g, char *file)
 {
-    char	*sess;
-    char	*p;
+    char	*sess, *ptr, *p;
+    int		len, nn;
 
-    if ((sess = getfile(file, NULL)) == NULL)
+    if ((sess = getfile(file, &len)) == NULL)
     {
 	error(errno, "cannot read %s", file);
 	return false;
     }
+    nn = 0;
+    ptr = sess;
+    while ((p = memchr(ptr, '\0', len)) != NULL)
+    {
+	len -= p + 1 - ptr;
+	if (len > 0)
+	{
+	    *p = ' ';
+	    ptr = p + 1;
+	    nn++;
+	}
+	else
+	    break;
+    }
+    if (nn > 0)
+	trace(TL_EVNT, "replaced %d NULs from %s with spaces", nn, file);
     p = strstr(sess, g->ActiveStr);
     xfree(sess);
 
