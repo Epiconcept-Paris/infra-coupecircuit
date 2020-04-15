@@ -207,7 +207,7 @@ glob_t		globals = {
     }
     {
 	{ "dtrace_level",	1, 1, intv, { .i = NUMIVAL },	{ .i = 0 },		0, {},
-				"trace level (can be verbose !)" },
+				"trace level for deamon and counter" },
 	{ "bin_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/usr/local/lib/%s" },	0, {},
 				"where to find binaries if nowhere else" },
 	{ "log_dir",		0, 0, NULL, { .s = STRIVAL },	{ .s = "/var/log/%s" },	0, {},
@@ -401,26 +401,44 @@ int		xasprintf(char **buf, const char *fmt, ...)
 /*
  * ====	File utilities =================================================
  *
- *  Return a pointer to 'path' file's content
+ *  Return a pointer to 'path' file's text content
+ *	and file length if *plen is not NULL
  *  If error or file empty, return NULL
  */
-char		*getfile(char *path)
+char		*getfile(char *path, int *plen)
 {
-    char	buf[GETFILE_MAXSIZE];
-    int		fd, len = -1;
+    struct stat	st;
+    char	buf[LOG_BUF_SIZE], *big = NULL;
+    int		fd, len, sz = sizeof buf;
 
+    /* local buffer is used to read /proc file that have size=0 */
     if ((fd = open(path, O_RDONLY)) >= 0)
     {
-	len = read(fd, buf, sizeof buf);
+	if (fstat(fd, &st) == 0)
+	{
+	    if ((sz = st.st_size) > sizeof buf)
+		big = xmalloc(sz + 1);
+	}
+	len = read(fd, big != NULL ? big : buf, sz);
 	close(fd);
     }
     if (len > 0)
     {
-	if (len == sizeof buf)
-	    warn("only read %d bytes from file \"%s\"", --len, path);
+	if (big == NULL)
+	{
+	    big = xmalloc(len + 1);
+	    memcpy(big, buf, len);
+	}
+	if (memchr(big, '\0', len) != NULL)
+	    warn("file \"%s\" contains NUL(s)", path);
 	buf[len] = '\0';
-	return xstrdup(buf);
+	if (plen != NULL)
+	    *plen = len;
+	return big;
     }
+    if (big != NULL)
+	xfree(big);
+
     return NULL;
 }
 
@@ -775,7 +793,7 @@ int		lvlv(glob_t *g, const char *s, int ln)
 /*
  *  Parse config file (called at init and config reloads)
  */
-bool		parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *))
+bool		parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *), bool(*end)(glob_t *))
 {
     regmatch_t	match[NB_CFGV_RESUBS], *mp = &match[1];
 #ifdef CFG_IVALS
@@ -790,7 +808,7 @@ bool		parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *))
     int		nl, ln, iv, err, n;
 
     trace(TL_CONF, "reading config from %s", g->cfg_path);
-    if ((buf = getfile(g->cfg_path)) == NULL)	/* free: before parse_conf() return */
+    if ((buf = getfile(g->cfg_path, NULL)) == NULL)	/* free: before parse_conf() return */
     {
 	error(errno, "cannot read %s", g->cfg_path);
 	return false;
@@ -807,6 +825,7 @@ bool		parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *))
     if (nl == 0)
     {
 	error(0, "config file %s has no newline characters ??", g->cfg_path);
+	xfree(buf);
 	return false;
     }
 
@@ -975,7 +994,7 @@ bool		parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *))
 	    trace(TL_CONF, "config['%s'] %s= \"%s\"", vp->name, upd ? "" : "!", vp->val.s);
 	}
     }
-    return true;
+    return end(g);
 }
 
 /*
@@ -1062,7 +1081,7 @@ void		parse_args(glob_t *g, int ac, char **av)
 
 	if (realpath(av[0], real) == NULL)
 	{
-	    if ((exe = getfile(name)) == NULL)		/* free: just below */
+	    if ((exe = getfile(name, NULL)) == NULL)		/* free: just below */
 		errexit(EX_PATH, errno, "cannot read file %s ?", name);
 	    path = exe;
 	}
@@ -1508,7 +1527,7 @@ void		handle_logs(glob_t *g)
     fd_set	readfd;
     int		ret, max;
 
-    timeout.tv_sec = g->LogWait;
+    timeout.tv_sec  = g->LogWait;
     timeout.tv_usec = 0;
     max = prepare_fdset(g, &readfd);
     if (max == 0)
@@ -1834,10 +1853,6 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
     };
     int		i, newRld, newRot;
 
-    /*
-     *	Propagate config value to globals
-     */
-    g->fork_delay = g->ChildDelay;
     if (g->kill_prg)
 	return 0;
 
@@ -1921,6 +1936,16 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
     return 0;
 }
 
+bool		set_glob(glob_t *g)
+{
+    /*
+     *	Propagate config value to globals
+     */
+    g->fork_delay = g->ChildDelay;
+
+    return true;
+}
+
 void 		terminate(int sig)
 {
     info("received SIGTERM");
@@ -1936,7 +1961,7 @@ int		main(int ac, char **av)
     parse_args(g, ac, av);
     conf_init(g);
     get_cfgpath(g);
-    if (!parse_conf(g, apply_conf))
+    if (!parse_conf(g, apply_conf, set_glob))
 	return EX_CONF;
     check_pidfile(g);
 
@@ -2012,7 +2037,7 @@ int		main(int ac, char **av)
 		{
 		    int	old_reload = g->SigReload;
 
-		    if (parse_conf(g, apply_conf))
+		    if (parse_conf(g, apply_conf, set_glob))
 			kill_children(g, old_reload);
 		}
 		else if (g->sig == g->SigRotate)
