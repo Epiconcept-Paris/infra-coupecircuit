@@ -1,0 +1,45 @@
+#!/usr/bin/php
+<?php
+
+function dump_var($val, $NL = "\n", $level = 0)
+{
+    $type = gettype($val);
+    // Handle all gettype return values
+    if ($type == 'array' || $type == 'object' || $type == 'string')  // Test first for speed
+	return dump_sub($val, $NL, $level);
+    if ($type == 'boolean')
+	return $val ? 'true' : 'false';
+    if ($type == 'integer' || $type == 'double')
+	return $val;
+    if ($type == 'resource')
+	return get_resource_type($val).' resource';
+    if ($type == 'NULL')
+	return 'null';
+    return "($type)";   // "unknown type"
+}
+
+function dump_sub($var, $NL, $level)
+{
+    $TAB = str_repeat(' ', 4);
+    $indent = str_repeat($TAB, $level);
+    $out = '';
+    #$beg = "$NL$indent";
+    $beg = ' ';
+    if (is_string($var))
+	return "\"".($NL == "\n" ? str_replace($NL, "$NL$indent$TAB\u{240A}",$var) : $var)."\"";
+    elseif (is_array($var))
+	$out = "Array$beg($NL";
+    elseif (is_object($var))
+	$out = get_class($var)." object$beg($NL";
+    foreach($var as $key => $val)
+	$out .= $indent.$TAB."[$key] => ".dump_var($val,$NL,$level + 1).$NL;
+    return "$out$indent)";
+}
+
+if ($argc > 1)
+{
+    session_start();
+    session_decode(file_get_contents($argv[1]));
+    echo dump_var($_SESSION)."\n";
+    session_destroy();
+}
