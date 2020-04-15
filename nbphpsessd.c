@@ -429,7 +429,7 @@ char		*getfile(char *path, int *plen)
 	    big = xmalloc(len + 1);
 	    memcpy(big, buf, len);
 	}
-	if (plen != NULL && memchr(big, '\0', len) != NULL)
+	if (plen == NULL && memchr(big, '\0', len) != NULL)
 	    warn("file \"%s\" contains NUL(s)", path);
 	big[len] = '\0';
 	if (plen != NULL)
