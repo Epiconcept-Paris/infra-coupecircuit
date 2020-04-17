@@ -1,7 +1,7 @@
 #
 #	Makefile for BINS binaries
 #
-BINS = sesswatch modif
+BINS = modif
 
 #CFLAGS	= -Wall -ggdb -o -fsanitize=address -fno-omit-frame-pointer
 CFLAGS	= -O -Wall

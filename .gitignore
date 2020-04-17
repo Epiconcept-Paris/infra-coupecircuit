@@ -1,6 +1,7 @@
 work
 nbphpsess
 nbphpsessd
-sesswatch
+modif
 *.pid
 *.log
+NbSess
