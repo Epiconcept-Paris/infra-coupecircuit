@@ -40,9 +40,12 @@ GetCfg()
     Cfg=`CfgFile`
     test "$1" && echo "Reloading $Cfg" >&2 || echo "Config from $Cfg" >&2
     CfgVar conf_reload_sig Rld USR1
-    CfgVar report_url Url 'https://`hostname`.voozanoo.net/localapc'
-    CfgVar curl_timeout Cto 20
     CfgVar report_freq Frq 5
+    CfgVar report_curl Rpc y
+    CfgVar report_url Url 'https://`hostname`.voozanoo.net/localapc'
+    CfgVar ldavg_method Lar php
+    CfgVar curl_timeout Cto 20
+    CfgVar report_file Rpf ''
 }
 
 GotSig()
@@ -69,18 +72,20 @@ SigRld()
 Pkg=`basename $0 .sh`
 Prg=`basename $0`
 Dir=`dirname $0`
-expr "$Pkg" : '.*test$' >/dev/null && Dry=y	# Dry run mode (do not call curl)
 
 if tty >/dev/null; then		# Interactive test mode
-    schr='?'
+    # Sch (status character) is only set in interactive mode
+    Sch='?'
     eof=`stty -a | sed -nr 's/^.* eof = ([^;]+);.*\$/\1/p'`
-    echo "Enter (int)nb-sessions-php (or type $eof for end, $schr<cr> for status)"
+    echo "Enter (int)nb-sessions-php (or type $eof for end, $Sch<cr> for status)"
 fi
-test "$schr" || echo "Starting $Prg" >&2
+test "$Sch" || echo "Starting $Prg" >&2
 
 eval `GetCfg`
-#echo "Cfg=$Cfg Rld=$Rld Url=[$Url] Cto=$Cto Frq=$Frq"; exit 0
-test "$Dry" && echo "Dry-run mode (curl not called)" >&2
+#echo "Cfg=$Cfg Rld=$Rld Frq=$Frq Rpc=$Rpc Url=[$Url] Lar=$Lar Cto=$Cto Rpf=$Rpf"; exit 0
+test "$Rpc" && echo "Report with curl (to PHP APC-set page)" >&2
+test "$Rpf" && echo "Report to file $Rpf" >&2
+test "$Rpc" -o "$Rpf" || { echo "Reporting to curl by default (legacy)" >&2; Rpc=y; }
 
 trap SigTerm TERM
 trap SigRld $Rld
@@ -105,20 +110,30 @@ do
     do
 	test "$Sig" && break
 	test "$nb" || continue
-	if [ "$schr" -a "$nb" = "$schr" ]; then
+
+	if [ "$Sch" -a "$nb" = "$Sch" ]; then
+	    # interactive get
 	    echo "curl -m $Cto -s \"$Url?$NSV&$LAV\" =>"
 	    curl -m $Cto -s "$Url?$NSV&$LAV" | sed 's/^/  > /'
-	else
-	    Now=`date '+%s'`
-	    if [ "$Now" -le "$Nxt" ]; then
-		la=`uptime | sed -e 's/^.* load average: //' -e 's/, /;/g'`
-		echo "NbSess=$nb LdAvg=\"$la\""
-		test "$Dry" || curl -m $Cto -s "$Url?$NSV=$nb&$LAV=$la"
-	    elif [ -z "$schr" ]; then
-		echo "Skipped curl as we are `expr $Now - $Nxt` second(s) late" >&2
-	    fi
-	    Nxt=`expr $Now + $Frq`
+	    continue
 	fi
+	Now=`date '+%s'`
+	if [ "$Now" -le "$Nxt" ]; then
+	    if [ "$Rpc" ]; then
+		if [ "$Lra" = 'sh' ]; then
+		    la=`uptime | sed -e 's/^.* load average: //' -e 's/, /;/g'`
+		    echo "NbSess=$nb LdAvg=\"$la\""
+		else
+		    la='php'
+		    echo "NbSess=$nb"
+		fi
+		curl -m $Cto -s "$Url?$NSV=$nb&$LAV=$la"
+	    fi
+	elif [ "$Rpc" ]; then
+	    test "$Sch" || echo "Skipped curl as we are `expr $Now - $Nxt` second(s) late" >&2
+	fi
+	test "$Rpf" && echo "$nb" >$Rpf
+	Nxt=`expr $Now + $Frq`
     done
     test "$Sig" = 'TERM' && break
 done

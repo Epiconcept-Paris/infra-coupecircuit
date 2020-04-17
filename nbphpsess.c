@@ -1,20 +1,28 @@
 /*
- *  nbphpsess.c
+ *  nbphpsess.c - Count PHP 'active' sessions in a given directory
  *
- *  Count PHP 'active' sessions in given directory
+ *  A session file is considered active if:
+ *	- its name starts with sess_
+ *	- its size is above a minimum value
+ *	- its age is below a maximum value
+ *	- its content contains a specific string
  *
  *  Synopsis:
- *
- *	- Scan directory for active sessions and report initial count
+ *	- scan directory for sessions and
+ *		build list of active sessions (proper name, size, age, content)
+ *		report initial count
  *	- setup directory watch
- *	- directory watch loop (in select with report_freq timeout)
- *	    if new file:
- *		add file to watcch
- *	    if file modified:
- *		check if active (contains "s:15:\"iConnectionType\";")
- *	- max user watch in /proc/sys/fs/inotify/max_user_watches
- *		but we need only ONE !
- *
+ *	- until terminated
+ *		. wait for directory watch events (in select with report_freq timeout)
+ *	   	    if file modified:
+ *			ignore if name not proper
+ *			if proper size, age, and content
+ *			    add to the active-list if absent
+ *			else
+ *			    remove it from the active-list if present
+ *		    if file deleted:
+ *			remove it from the active-list if present
+ *		. report on stdout the number of active sessions
  */
 #define _GNU_SOURCE
 
@@ -50,18 +58,19 @@
 #define EX_NOMEM	8
 #define EX_LOGIC	9
 
-/* global errors */
+/* Trace levels */
+/* If changed, also update trace_level's config-var help  */
+#define TL_CONF		16
+#define TL_INOT		32
+#define TL_EVNT		64
+
+/* global config errors */
 #define ERR_CFG_NUM	1
 #define ERR_CFG_SIG	2
 #define ERR_CFG_FAC	3
 #define ERR_CFG_LVL	4
 
-/* trace levels */
-#define TL_CONF		16
-#define TL_INOT		32
-#define TL_EVNT		64
-
-#define LOG_BUF_SIZE	4096
+#define LOG_BUF_SIZE	(4 * 1024)
 
 #define CFG_DEFDIR	"/etc/epiconcept"
 #define CFGPATH_ENVFMT	"%s_CONF"
@@ -110,34 +119,43 @@ typedef struct	sess_s
     time_t	mtime;
 }		sess_t;
 
-typedef	struct	glob_s
+/*  Any change to struct glob_s MUST be reflected in 'globals' init below */
+
+typedef	struct	glob_s		/* global variables */
 {
-#define NB_CFGVARS	9
+#   define NB_CFGVARS	9
     cfgvar_t	config[NB_CFGVARS];	/* Must be 1st member for init */
+
+    char	*cfg_arg;
+    char	*cfg_path;
+    int		cfgerr;
 
     char	*prg;		/* basename from av[0] */
     char	*prg_dir;
 
-    char	*cfg_path;
-    int		cfgerr;
+    char	*pkg;		/* our package name */
 
     int		ifd;
     int		iwd;
+    bool	allevt;		/* from -a on command line */
 
     sess_t	*sessions;
     int		pfx_len;
 
-    int		loop;
+    FILE	*log_fp;
+
     int		sig;
+    int		loop;
 }		glob_t;
 
 /*
- *  Initialize 'globals'
+ *{ Initialize (the beginning of) 'globals'
+ *
  *	used as 'globals' only in main(), signal handlers and log functions
  *	used as 'glob_t *g' everywhere else
-*/
-int	intv(glob_t *, const char *, int);
-int	sigv(glob_t *, const char *, int);
+ */
+static int	intv(glob_t *, const char *, int);
+static int	sigv(glob_t *, const char *, int);
 
 glob_t		globals = {
 
@@ -176,12 +194,12 @@ glob_t		globals = {
 	{.i=NUMIVAL}, {.i=NUMIVAL}\
     }
     {
-	{ "dtrace_level",	1, 1, intv, { .i = NUMIVAL },	{ .i = 0 },		0, {},
-				"trace level for deamon and counter" },
+	{ "trace_level",	1, 1, intv, { .i = NUMIVAL },	{ .i = 0 },		0, {},
+				"trace level (16:conf, 32:inotity, 64:events)" },
 	{ "sess_dir",		1, 0, NULL, { .s = STRIVAL },	{ .s = "/var/lib/php/sessions" }, 0, {},
-				"main directory to watch" },
-	{ "max_sess_size",	1, 1, intv, { .i = NUMIVAL },	{ .i = 16384 },		0, {},
-				"maximum sessions size examined" },
+				"main directory to watch (if relative, to work_dir)" },
+	{ "max_active_sess",	1, 1, intv, { .i = NUMIVAL },	{ .i = 16384 },		0, {},
+				"maximum number of active sessions" },
 	{ "sess_prefix",	1, 0, NULL, { .s = STRIVAL },	{ .s = "sess_" },	0, {},
 				"ignore filenames not starting like this" },
 	{ "sess_minsize",	1, 1, intv, { .i = NUMIVAL },	{ .i = 64 },		0, {},
@@ -195,10 +213,13 @@ glob_t		globals = {
 	{ "conf_reload_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR1 },	0, {},
 				"conf-reload signal (SIGxxx also accepted)" }
     },
-    NULL, NULL, NULL, 0, -1, -1
+    NULL, NULL, 0, NULL, NULL, NULL, -1, -1
 };
+/*} End init globals */
 
 /*
+ *===== Start common code { ============================================
+ *
  *  Log and trace macros
  *
  *	info("pid=%d sd=%d net write=0", s->pid, s->netsd);
@@ -219,7 +240,7 @@ glob_t		globals = {
  * ====	Logging and tracing functions ==================================
  */
 #define	hstamp(t)		(tstamp(t," ")+11)
-char		*tstamp(time_t t, char *sep)	/* Only for loglines() just below */
+static char	*tstamp(time_t t, char *sep)	/* Only for loglines() just below */
 {
     static char	buf[32];
     struct tm	*tp;
@@ -233,11 +254,47 @@ char		*tstamp(time_t t, char *sep)	/* Only for loglines() just below */
     return buf;
 }
 
-/*  Log line (called by logmsg(), trcmsg() and xitmsg()) */
-void		loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
+/*  Return fd type (cached) */
+static char	fd_type(int fd)
 {
-    FILE	*fp = stderr;
-    char	*line, *p;
+    struct stat st;
+    struct f_type
+    {
+	int	mask;
+	char	type;
+    }		tbl[] = {
+	{ S_IFSOCK,	's' },	/* socket */
+	{ S_IFLNK,	'l' },	/* symlink (never: needs lstat() */
+	{ S_IFREG,	'f' },	/* file */
+	{ S_IFBLK,	'b' },	/* bdev (unlikely) */
+	{ S_IFDIR,	'd' },	/* dir */
+	{ S_IFCHR,	'c' },	/* cdev (including tty) */
+	{ S_IFIFO,	'p' }	/* pipe (or fifo) */
+    };
+    static char	ift = '\0';
+    static int	ifd = -1;
+    int		i;
+
+    if (fd == ifd && ift != '\0')
+	return ift;
+
+    if (fstat(fd, &st) < 0)
+	return 'e';
+
+    for (i = 0; i < (sizeof tbl / sizeof(struct f_type)); i++)
+    {
+	if (((st.st_mode & S_IFMT) == tbl[i].mask))
+	    return ifd = fd, ift = tbl[i].type;
+    }
+    return 'u';
+}
+
+/*  Log line (called by logmsg(), trcmsg() and xitmsg()) */
+static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
+{
+    bool	log = (globals.log_fp != NULL);
+    FILE	*fp = log ? globals.log_fp : stderr;
+    char	*line, *p, ft = fd_type(fileno(fp));
     int		nl = 0;
 
     if (*msg == '\0')
@@ -248,12 +305,17 @@ void		loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
     {
 	if (*line == '\0')
 	    continue;
-
+	if (log || ft == 'f')
+	    fprintf(fp, "%s\t", tstamp(0, " "));
 	if (nl == 0)
 	{
-	    if (isatty(fileno(stdin)))
-		fprintf(fp, "%s ", tstamp(0, " "));
-
+	    if (!log && ft == 'c')
+	    {
+		if (*line != '\\')	/* add ':' only for info() */
+		    fprintf(stderr, "%s%s", globals.prg, (tag != NULL && *tag == '\0') ? ": " : " ");
+		else
+		    line++;
+	    }
 	    if (tag == NULL)		/* trace */
 		fprintf(fp, "%s:%d ", fn, ln);
 	    else if (*tag != '\0')	/* all others but info */
@@ -274,7 +336,7 @@ void		loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
     }
 }
 
-void		logmsg(int x, const char *fn, int ln, char *tag, char *fmt, ...)
+static void	logmsg(int x, const char *fn, int ln, char *tag, char *fmt, ...)
 {
     va_list	ap;
     char	buf[LOG_BUF_SIZE];
@@ -287,10 +349,10 @@ void		logmsg(int x, const char *fn, int ln, char *tag, char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    loglines(tag != NULL ? x : 0, fn, ln, tag, buf);
+    loglines(tag != NULL ? x : 0, fn, ln, tag, buf);	/* x is errno or 0 */
 }
 
-void		xitmsg(int xcode, int syserr, const char *fn, int ln, char *fmt, ...)
+static void	xitmsg(int xcode, int syserr, const char *fn, int ln, char *fmt, ...)
 {
     va_list	ap;
     char	buf[LOG_BUF_SIZE];
@@ -300,15 +362,16 @@ void		xitmsg(int xcode, int syserr, const char *fn, int ln, char *fmt, ...)
     va_end(ap);
     /* force trace if EX_LOGIC */
     loglines(syserr, fn, ln, xcode == EX_LOGIC ? NULL : "", buf);
-    info("exiting with code=%d", xcode);
-    usleep(500 * 1000);
+    if (globals.log_fp != NULL || fd_type(fileno(stderr)) != 'c')
+	info("exiting with code=%d", xcode);
+
     exit(xcode);
 }
 
 /*
  * ====	Memory allocation functions ====================================
  */
-void		*xmalloc(size_t u)
+static void	*xmalloc(size_t u)
 {
     void	*ret;
 
@@ -317,7 +380,7 @@ void		*xmalloc(size_t u)
     return ret;
 }
 
-void		*xfree(void *ptr)
+static void	*xfree(void *ptr)
 {
     if (ptr != NULL)
 	free(ptr);
@@ -325,7 +388,7 @@ void		*xfree(void *ptr)
     return NULL;
 }
 
-void		*xstrdup(const char *str)
+static void	*xstrdup(const char *str)
 {
     void	*ret;
 
@@ -337,7 +400,7 @@ void		*xstrdup(const char *str)
     return ret;
 }
 
-int		xasprintf(char **buf, const char *fmt, ...)
+static int	xasprintf(char **buf, const char *fmt, ...)
 {
     int		nb;
     va_list	ap;
@@ -357,7 +420,7 @@ int		xasprintf(char **buf, const char *fmt, ...)
  *	and file length if *plen is not NULL
  *  If error or file empty, return NULL
  */
-char		*getfile(char *path, int *plen)
+static char	*getfile(char *path, int *plen)
 {
     struct stat	st;
     char	buf[LOG_BUF_SIZE], *big = NULL;
@@ -397,7 +460,7 @@ char		*getfile(char *path, int *plen)
 /*
  *  Return basename of a path, or path itself if no '/' in it
  */
-char		*base_name(char *path)
+static char	*base_name(char *path)
 {
     char	*p = strrchr(path, '/');
 
@@ -405,11 +468,11 @@ char		*base_name(char *path)
 }
 
 /*
- * ====	Parse config file ==============================================
+ * ====	Handle configuration file and variables ========================
  *
  *  Return regcomp / regex error string
  */
-char		*re_err(regex_t *rep, int errcode)
+static char	*re_err(regex_t *rep, int errcode)
 {
     static char	msg[1024];
 
@@ -421,7 +484,7 @@ char		*re_err(regex_t *rep, int errcode)
 /*
  *  Compile regexps in 'globals.config'
  */
-void		conf_init(glob_t *g)
+static void	conf_init(glob_t *g)
 {
     cfgvar_t	*vp;
     char	*refmt = CFGVAR_REFMT;
@@ -437,32 +500,88 @@ void		conf_init(glob_t *g)
 	snprintf(re, sizeof re, refmt, vp->name);
 	if ((err = regcomp(&vp->regexp, re, REG_EXTENDED)) != 0)
 	    errexit(EX_LOGIC, 0, "regcomp error for %s: %s", vp->name, re_err(&vp->regexp, err));
+
 	if (vp->regexp.re_nsub != (NB_CFGV_RESUBS - 1))
 	    errexit(EX_LOGIC, 0, "regcomp requires %d matches for %s", vp->regexp.re_nsub + 1, vp->name);
+
 	if (vp->isint == 0 && strchr(vp->def.s, '%') != NULL)
 	{
-	    snprintf(def, sizeof def, vp->def.s, g->prg);
+	    snprintf(def, sizeof def, vp->def.s, g->pkg);
 	    vp->def.s = xstrdup(def);	/* free: never (init) */
 	}
     }
 }
 
+static void	set_cfg_env(glob_t *g, char *var)
+{
+    char	*env;
+
+    if (strcmp(g->prg, g->pkg) == 0)
+	return;
+    xasprintf(&env, "%s=%s", var, g->cfg_path);
+    if (putenv(env) != 0)
+	errexit(EX_NOMEM, 0, "unable to allocate memory");
+}
+
 /*
  *  Determine config path
  */
-void		get_cfgpath(glob_t *g)
+static void	get_cfgpath(glob_t *g)
 {
     char	path[PATH_MAX];
+    char	cfgfile[NAME_MAX];
     char	env_var[32];
     char	*p;
     int		i;
 
     /* Make variable name */
-    if (snprintf(env_var, sizeof env_var, CFGPATH_ENVFMT, g->prg) >= sizeof env_var)
+    if (snprintf(env_var, sizeof env_var, CFGPATH_ENVFMT, g->pkg) >= sizeof env_var)
 	errexit(EX_CONF, 0, "env variable name for config-file is too long");
-    for (i = 0; i < strlen(g->prg); i++)
+    for (i = 0; i < strlen(g->pkg); i++)
 	env_var[i] = toupper(env_var[i]);
     trace(TL_CONF, "env_var = %s", env_var);
+
+    if (g->cfg_arg != NULL)	/* Was set by parse_args */
+    {
+	char	real[PATH_MAX], *bad;
+
+	if (g->cfg_arg[0] == '/')
+	{
+	    trace(TL_CONF, "trying cfg_path = %s", g->cfg_arg);
+	    if (access(g->cfg_arg, R_OK) == 0)
+	    {
+		g->cfg_path = g->cfg_arg;
+		g->cfg_arg = NULL;
+		set_cfg_env(g, env_var);
+		return;
+	    }
+	    bad = g->cfg_arg;
+	}
+	else
+	{
+	    if ((realpath(g->cfg_arg, real)) != NULL)
+	    {
+		trace(TL_CONF, "trying cfg_path = %s", real);
+		if (access(real, R_OK) == 0)
+		{
+		    g->cfg_path = xstrdup(real);
+		    g->cfg_arg = xfree(g->cfg_arg);
+		    set_cfg_env(g, env_var);
+		    return;
+		}
+		bad = real;
+	    }
+	    else if ((p = strrchr(g->cfg_arg, '/')) == NULL)
+		strcpy(cfgfile, p + 1);
+	    else
+		bad = g->cfg_arg;;
+	}
+	if (bad != NULL)
+	    errexit(EX_CONF, 0, "cannot access config-file %s", bad);
+	g->cfg_arg = xfree(g->cfg_arg);
+    }
+    else
+	snprintf(cfgfile, sizeof cfgfile, "%s.conf", g->pkg);
 
     /* Try from getenv */
     if ((p = getenv(env_var)) != NULL)
@@ -476,24 +595,26 @@ void		get_cfgpath(glob_t *g)
     }
 
     /* Try from prg_dir */
-    snprintf(path, sizeof path, "%s/%s.conf", g->prg_dir, g->prg);
+    snprintf(path, sizeof path, "%s/%s", g->prg_dir, cfgfile);
     trace(TL_CONF, "trying cfg_path = %s", path);
     if (access(path, R_OK) == 0)
     {
 	g->cfg_path = xstrdup(path);	/* free: never (init 2) */
+	set_cfg_env(g, env_var);
 	return;
     }
 
     /* Try from default config dir */
-    snprintf(path, sizeof path, CFG_DEFDIR "/%s.conf", g->prg);
+    snprintf(path, sizeof path, CFG_DEFDIR "/%s", cfgfile);
     trace(TL_CONF, "trying cfg_path = %s", path);
     if (access(path, R_OK) == 0)
     {
 	g->cfg_path = xstrdup(path);	/* free: never (init 3) */
+	set_cfg_env(g, env_var);
 	return;
     }
-    errexit(EX_CONF, 0, "cannot find config-file %s.conf in env, %s or in " CFG_DEFDIR,
-	g->prg, g->prg_dir);
+    p = g->cfg_arg != NULL ? "args, " : "";
+    errexit(EX_CONF, 0, "cannot find config-file %s in %senv, %s or in " CFG_DEFDIR, cfgfile, p, g->prg_dir);
 }
 
 /*
@@ -501,7 +622,7 @@ void		get_cfgpath(glob_t *g)
  *
  *	Check integer value
  */
-int		intv(glob_t *g, const char *s, int ln)
+static int	intv(glob_t *g, const char *s, int ln)
 {
     const char	*p = s;
 
@@ -523,7 +644,7 @@ int		intv(glob_t *g, const char *s, int ln)
 }
 
 /*	Generic string to int conversion. Also returns list of valid strings. */
-int		stoi(sconvi_t *tbl, int sz, const char *s, char **help, char *sep)
+static int	stoi(sconvi_t *tbl, int sz, const char *s, char **help, char *sep)
 {
     int		i, nb;
 
@@ -544,7 +665,7 @@ int		stoi(sconvi_t *tbl, int sz, const char *s, char **help, char *sep)
 }
 
 /*	Convert signal name to signal number */
-int		sigv(glob_t *g, const char *s, int ln)
+static int	sigv(glob_t *g, const char *s, int ln)
 {
     /* If you change this table, also update apply_conf()'s array */
     static sconvi_t	tbl[] = {
@@ -587,7 +708,7 @@ int		sigv(glob_t *g, const char *s, int ln)
 }
 
 /*	Ugly hack to convert signal number to signal name */
-char		*sigstr(glob_t *g, int sig)
+static char	*sigstr(glob_t *g, int sig)
 {
     static char	def[16];
 
@@ -602,7 +723,7 @@ char		*sigstr(glob_t *g, int sig)
 /*
  *  Parse config file (called at init and config reloads)
  */
-bool		parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *), bool(*end)(glob_t *))
+static bool	parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *), bool(*end)(glob_t *))
 {
     regmatch_t	match[NB_CFGV_RESUBS], *mp = &match[1];
 #ifdef CFG_IVALS
@@ -807,12 +928,77 @@ bool		parse_conf(glob_t *g, int(*apply)(glob_t *, cfgval_t *), bool(*end)(glob_t
 }
 
 /*
- *=====	Parse command line and check paths =============================
+ *  Show all config variables, their updatability
+ *  and type, default value and help
+ */
+static void	config_help(glob_t *g)
+{
+    cfgvar_t	*vp;
+    char	*def[NB_CFGVARS];
+    int		i, nw = 4, dw = 7, cw = 7, len;
+
+    /* Let the maniac loose: compute column widths */
+    for (i = 0; i < NB_CFGVARS; i++)
+    {
+	vp = &g->config[i];
+	if (vp->isint)
+	    xasprintf(&def[i], "%d", vp->def.i);	/* free: never (init) */
+	else if (strchr(vp->def.s, '%') != NULL)
+	    xasprintf(&def[i], vp->def.s, g->pkg);	/* free: never (init) */
+	else
+	    def[i] = vp->def.s;
+    }
+    for (i = 0; i < NB_CFGVARS; i++)
+    {
+	vp = &g->config[i];
+	if ((len = strlen(vp->name)) > nw)
+	    nw = len;
+	if ((len = strlen(def[i])) > dw)
+	    dw = len;
+	if ((len = strlen(vp->help)) > cw)
+	    cw = len;
+    }
+
+    /* Header */
+    printf("Configuration variables (in %s.conf):\n", g->pkg);
+    printf("  %-*s isInt isUpd %-*s %-*s\n", nw, "Name", dw, "Default", cw, "Comment");
+    fputs("  ", stdout);
+    for (i = 0; i < nw; i++)
+	putchar('-');
+    fputs(" ----- ----- ", stdout);
+    for (i = 0; i < dw; i++)
+	putchar('-');
+    putchar(' ');
+    for (i = 0; i < nw; i++)
+	putchar('-');
+    putchar('\n');
+
+    /* Values */
+    for (i = 0; i < NB_CFGVARS; i++)
+    {
+	cfgvar_t*   vp;
+	char	    idef[32];
+
+	vp = &g->config[i];
+	if (vp->isint)
+	    snprintf(idef, sizeof idef, "%d", vp->def.i);
+	printf("  %-*s   %c     %c   %-*s %-*s\n", nw, vp->name, vp->isint ? 'y' : ' ', vp->isupd ? 'y' : ' ', dw, def[i], cw, vp->help);
+    }
+    exit(EX_OK);
+}
+
+/*
+ *===== End common code } ==============================================
+ */
+
+/*
+ *{==== Parse command line and check paths =============================
  */
 void		parse_args(glob_t *g, int ac, char **av)
 {
     char	real[PATH_MAX];
     char	*path, *exe, *p;
+    int		argerr = 0, val;
 
     exe = NULL;
     if (av[0][0] != '/')
@@ -821,7 +1007,7 @@ void		parse_args(glob_t *g, int ac, char **av)
 
 	if (realpath(av[0], real) == NULL)
 	{
-	    if ((exe = getfile(name, NULL)) == NULL)	/* free: just below */
+	    if ((exe = getfile(name, NULL)) == NULL)		/* free: just below */
 		errexit(EX_PATH, errno, "cannot read file %s ?", name);
 	    path = exe;
 	}
@@ -839,12 +1025,49 @@ void		parse_args(glob_t *g, int ac, char **av)
 	xfree(exe);				/* free from getfile() */
 
     trace(TL_CONF, "prg=% prg_dir=%s", g->prg, g->prg_dir);
+    g->pkg = g->prg;
+
+    while ((val = getopt(ac, av, "acf:ht:")) != EOF)
+    {
+	switch (val)
+	{
+	    case 'f':	g->cfg_arg = xstrdup(optarg);	break;	/* free: in get_cfgpath() */
+	    case 't':	g->TraceLevel = g->TlvConv(g, optarg, 0);	break;
+
+	    case 'a':	g->allevt = true;	break;
+	    case 'c':	config_help(g);		break;	/* exits */
+	    case 'h':	argerr = -1;		break;
+	    default:	argerr = 1;		break;
+	}
+    }
+    ac -= optind;
+
+    if (argerr != 0)
+	errexit(argerr < 0 ? EX_OK : EX_USAGE, 0,
+	    "\\Usage: %s [-f conf-file] [-t trace-level]\n"
+	    "   %s -a\t\t# watch all inotify events\n"
+	    "   %s -c\t\t# show config-variable help",
+	    g->prg, g->prg, g->prg);
+
+    if (ac > 0)
+	notice("ignoring %d extra arguments", ac);
 }
+/*} End parse command line */
 
 /*
- *=====	Main scan ======================================================
+ *{====	Main scan ======================================================
+ *
+ *  Check sessions files
+ *
+ *  Return true if file name starts with session prefix
  */
-time_t		invalid_sess(glob_t *g, char *file, struct stat *stp)
+bool		is_session(glob_t *g, char *file)
+{
+    return strlen(file) > g->pfx_len && strncmp(file, g->SessPrefix, g->pfx_len) == 0;
+}
+
+/*  Return mtime of recent and big enough session file, 0 otherwise */
+time_t		check_session(glob_t *g, char *file, struct stat *stp)
 {
     struct stat	st;
     time_t	now;
@@ -871,27 +1094,7 @@ time_t		invalid_sess(glob_t *g, char *file, struct stat *stp)
     return stp->st_mtime;
 }
 
-int		find_session(glob_t *g, char *name)
-{
-    sess_t	*sp;
-    int		i;
-
-    for (i = 0; i < g->MaxActive; i++)
-    {
-	sp = &g->sessions[i];
-
-	if (sp->name[0] == '\0')
-	{
-	    if (name == NULL)
-		return i;
-	    continue;
-	}
-	if (name != NULL && strcmp(sp->name, name) == 0)
-	    return i;
-    }
-    return -1;
-}
-
+/*  Return true if session file contains the active string, false if not */
 bool		active_session(glob_t *g, char *file)
 {
     char	*sess, *ptr, *p;
@@ -921,30 +1124,81 @@ bool		active_session(glob_t *g, char *file)
     return p != NULL;
 }
 
+/*
+ *  Handle session active list
+ *
+ *  Return index of name (or -1 if not found) if name not NULL, otherwise
+ *  return index of first empty slot (or -1 if none left)
+ */
+int		find_session(glob_t *g, char *name)
+{
+    sess_t	*sp;
+    int		i;
+
+    if (g->allevt)
+	return -1;
+    for (i = 0; i < g->MaxActive; i++)
+    {
+	sp = &g->sessions[i];
+
+	if (sp->name[0] == '\0')
+	{
+	    if (name == NULL)
+		return i;
+	    continue;
+	}
+	if (name != NULL && strcmp(sp->name, name) == 0)
+	    return i;
+    }
+    return -1;
+}
+
+/*  Add new session to list or refresh mtime */
 void		add_session(glob_t *g, char *name, time_t mtime)
 {
     sess_t	*sp;
     int		i;
 
-    if ((i = find_session(g, NULL)) < 0)
+    if (g->allevt)
+	return;
+    if ((i = find_session(g, name)) < 0)	/* not in list yet */
     {
-	warn("no more sessions (max=%d)", g->MaxActive);
+	if ((i = find_session(g, NULL)) < 0)	/* find empty slot */
+	{
+	    warn("no more sessions (max=%d)", g->MaxActive);
+	    /* Should we discard the oldest ? */
+	    return;
+	}
+	sp = &g->sessions[i];
+	trace(TL_EVNT, "adding to active-list (i=%d) new session %s", i, name);
+	snprintf(sp->name, sizeof sp->name, name);
     }
-    sp = &g->sessions[i];
-    snprintf(sp->name, sizeof sp->name, name);
+    else
+    {
+	sp = &g->sessions[i];
+	trace(TL_EVNT, "refreshing (i=%d) active session %s mtime %d -> %d", i, name, sp->mtime, mtime);
+    }
     sp->mtime = mtime;
 }
 
+/*  Remove new session from list (with trace), no error if missing */
 int		delete_session(glob_t *g, char *name)
 {
     int		i;
 
     if ((i = find_session(g, name)) >= 0)
+    {
 	g->sessions[i].name[0] = '\0';
-
+	trace(TL_EVNT, "removed session %s from active-list (i=%d)", name, i);
+    }
     return i;
 }
 
+/*
+ *  Initial setup
+ *
+ *  Scan directory for current state
+ */
 void		scan_dir(glob_t *g)
 {
     DIR		*dp;
@@ -952,6 +1206,7 @@ void		scan_dir(glob_t *g)
     time_t	mtime;
     int		nbf = 0, nbs = 0, nbr = 0, nba = 0;
 
+    info("starting initial directory scan");
     if ((dp = opendir(".")) != NULL)
     {
 	while ((ep = readdir(dp)) != NULL)
@@ -959,13 +1214,16 @@ void		scan_dir(glob_t *g)
 	    if (ep->d_type != DT_REG)
 		continue;
 	    nbf++;
+
 	    /* 'name' must start with "sess_" */
-	    if (strlen(ep->d_name) <= g->pfx_len || strncmp(ep->d_name, g->SessPrefix, g->pfx_len) != 0)
+	    if (!is_session(g, ep->d_name))
 		continue;
 	    nbs++;
-	    if ((mtime = invalid_sess(g, ep->d_name, NULL)) == 0)
+
+	    if ((mtime = check_session(g, ep->d_name, NULL)) == 0)
 		continue;
 	    nbr++;
+
 	    if (active_session(g, ep->d_name))
 	    {
 		add_session(g, ep->d_name + g->pfx_len, mtime);
@@ -974,33 +1232,70 @@ void		scan_dir(glob_t *g)
 	}
 	closedir(dp);
     }
-    trace(TL_INOT, "%d files, %d session, %d recent/big enough, %d active", nbf, nbs, nbr, nba);
+    info("found %d files, %d session, %d recent/big enough, %d active", nbf, nbs, nbr, nba);
+}
+
+char		*event_mask(int mask)
+{
+    struct evtname
+    {
+	int	mask;
+	char	*name;
+    }		tbl[] = {
+	{ IN_ACCESS,		"ACCESS"	},
+	{ IN_MODIFY,		"MODIFY"	},
+	{ IN_ATTRIB,		"ATTRIB"	},
+	{ IN_CLOSE_WRITE,	"CLOSE_WRITE"	},
+	{ IN_CLOSE_NOWRITE,	"CLOSE_NOWRITE"	},
+	{ IN_OPEN,		"OPEN"		},
+
+	{ IN_MOVED_FROM,	"MOVED_FROM"	},
+	{ IN_MOVED_TO,		"MOVED_TO"	},
+
+	{ IN_CREATE,		"CREATE"	},
+	{ IN_DELETE,		"DELETE"	},
+
+	{ IN_DELETE_SELF,	"DELETE_SELF"	},
+	{ IN_MOVE_SELF,		"MOVE_SELF"	},
+
+	{ IN_UNMOUNT,		"UNMOUNT"	},
+	{ IN_Q_OVERFLOW,	"Q_OVERFLOW"	},
+	{ IN_IGNORED,		"IGNORED"	}
+    };
+    static char	str[16 * (sizeof tbl / sizeof(struct evtname))];
+    int		i, sz = 0;
+
+    for (i = 0; i < (sizeof tbl / sizeof(struct evtname)); i++)
+    {
+	if ((mask & tbl[i].mask))
+	    sz += snprintf(str + sz, (sizeof str) - sz, "%s%s", sz > 0 ? "|" : "", tbl[i].name);
+    }
+    return sz > 0 ? str : "UNKNOWN";
 }
 
 bool		setup_loop(glob_t *g)
 {
-    if (chdir(g->SessDir) < 0)
-    {
-	error(errno, "chdir %s", g->SessDir);
-	return false;
-    }
     info("Watching directory \"%s\"", g->SessDir);
 
     if ((g->ifd = inotify_init()) < 0)
     {
 	error(errno, "inotify_init");
+	g->loop = -1;
 	return false;
     }
-    if ((g->iwd = inotify_add_watch(g->ifd, ".", IN_MODIFY|IN_DELETE)) < 0)
+    if ((g->iwd = inotify_add_watch(g->ifd, ".", g->allevt ? IN_ALL_EVENTS : (IN_MODIFY|IN_DELETE))) < 0)
     {
 	error(errno, "inotify_add_watch \".\"");
+	g->loop = -1;
 	return false;
     }
-    if (g->sessions == NULL)
+
+    if (g->allevt)
+	info("waiting for %s", event_mask(IN_ALL_EVENTS));
+    else if (g->sessions == NULL)
 	g->sessions = xmalloc(g->MaxActive * sizeof(sess_t));
 
     scan_dir(g);
-    g->loop = 1;
 
     return true;
 }
@@ -1008,13 +1303,10 @@ bool		setup_loop(glob_t *g)
 void		handle_events(glob_t *g, timeval_t *timeout)
 {
     fd_set	readfd;
-    ivent_t	 *evp;
-    struct stat	st;
-    time_t	mtime;
-    char	evbuf[512], *file;
-    int		ret, evn;
+    int		ret;
 
-    trace(TL_EVNT, "left=%d.%03d", timeout->tv_sec, timeout->tv_usec / 1000);
+    if (timeout->tv_sec > 0 || timeout->tv_usec > 0)
+	trace(TL_EVNT, "left=%d.%03d", timeout->tv_sec, timeout->tv_usec / 1000);
     FD_ZERO(&readfd);
     FD_SET(g->ifd, &readfd);
     if ((ret = select(g->ifd + 1, &readfd, NULL, NULL, timeout)) < 0)
@@ -1030,43 +1322,79 @@ void		handle_events(glob_t *g, timeval_t *timeout)
     }
     else if (ret > 0)
     {
-	evp = (ivent_t *)evbuf;
-	if ((evn = read(g->ifd, evbuf, sizeof evbuf)) >= (int)(sizeof *evp))
+	struct stat	st;
+	time_t		mtime;
+	ivent_t		*evp;
+	char		evbuf[(sizeof *evp + NAME_MAX + 1) * 16];
+	char		*evt, *file;
+	int		nb, off;
+
+	if ((nb = read(g->ifd, evbuf, sizeof evbuf)) < 0)
+	    error(errno, "read ifd=%d", g->ifd);
+
+	off = 0;
+	while ((nb - off) >= (sizeof *evp))
 	{
+	    evp = (ivent_t *)&evbuf[off];
+	    off += sizeof *evp + evp->len;
 	    file = evp->len > 0 ? evp->name : "";
-	    trace(TL_EVNT, "wd=%d mask=0x%x len=%d file=\"%s\"", evp->wd, evp->mask, evp->len, file);
+	    evt = event_mask(evp->mask);
+
+	    if ((evp->mask & IN_Q_OVERFLOW))	/* We must at least report that! */
+		warn("received %s", evt);
+
+	    if (g->allevt)
+	    {
+		info("wd=%d cookie=%d mask=%-13s len=%d file=\"%s\"", evp->wd, evp->cookie, evt, evp->len, file);
+		continue;
+	    }
+	    if ((evp->mask & (IN_MODIFY|IN_DELETE)))
+	    {
+		if (evp->len <= 0)
+		{
+		    warn("ignoring %s event with no filename", evt);
+		    continue;
+		}
+	    }
+
 	    if ((evp->mask & IN_MODIFY))
 	    {
-		if (evp->len <= 0)
-		    error(0, "mask=0x%08X MODIFY no file ?", evp->mask);
-		else if (stat(file, &st) < 0)
-		    error(errno, "mask=0x%08X MODIFY cannot stat \"%s\"", evp->mask, file);
-		else if ((mtime = invalid_sess(g, file, &st)) > 0)
+		if (stat(file, &st) < 0)
 		{
-		    trace(TL_EVNT, "checking if MODIFY file %s size=%d mtime=%s is active", file, st.st_size, tstamp(mtime, " "));
-		    if (active_session(g, file))
-		    {
-			add_session(g, file + g->pfx_len, mtime);
-			return;
-		    }
+		    error(errno, "mask=%s but cannot stat \"%s\"", evt, file);
+		    continue;
 		}
-		trace(TL_EVNT, "ignoring MODIFY file %s size=%d mtime=%s", file, st.st_size, hstamp(mtime));
-	    }
-	    if ((evp->mask & IN_DELETE))
-	    {
-		if (evp->len <= 0)
-		    error(0, "mask=0x%08X DELETE no file ?", evp->mask);
-		else if (strlen(file) > g->pfx_len && strncmp(file, g->SessPrefix, g->pfx_len) == 0)
+		if (is_session(g, file))
 		{
-		    int i = delete_session(g, file + g->pfx_len);
-		    trace(TL_EVNT, "deleting %s file (%sin active list)", file, i < 0 ? "NOT " : "");
+		    if ((mtime = check_session(g, file, &st)) > 0)
+		    {
+			if (active_session(g, file))		/* may already be active */
+			{
+			    add_session(g, file + g->pfx_len, mtime);
+			    continue;
+			}
+		    }
+		    /* too small or no more active */
+		    if (delete_session(g, file + g->pfx_len) < 0)	/* may do nothing */
+			trace(TL_EVNT, "file %s modified but still not active", file);
 		}
 		else
-		    trace(TL_EVNT, "ignoring DELETE file %s", file);
+		    trace(TL_EVNT, "ignoring %s file=%s size=%d mtime=%s", evt, file, st.st_size, hstamp(st.st_mtime));
+	    }
+
+	    if ((evp->mask & IN_DELETE))
+	    {
+		if (is_session(g, file))
+		{
+		    delete_session(g, file + g->pfx_len);
+		    trace(TL_EVNT, "deleting %s file", file);
+		}
+		else
+		    trace(TL_EVNT, "ignoring %s file %s", evt, file);
 	    }
 	}
-	else if (evn < 0)
-	    error(errno, "read ifd=%d", g->ifd);
+	if ((nb - off) > 0)
+	    warn("discarding %d extra bytes from ifd=%d", nb - off, g->ifd);
     }
 }
 
@@ -1119,9 +1447,10 @@ void		report_sessions(glob_t *g)
     if (ferror(stdout))
 	errexit(EX_PIPE, errno, "cannot write number-of-PHP-sessions (%d)", nb);
 }
+/*} End main scan */
 
 /*
- *=====	Program start and end functions ================================
+ *{====	Program start and end functions ================================
  */
 void 		trap_sig(int sig)
 {
@@ -1147,16 +1476,16 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 			{ SIGUSR2, SIG_DFL }
     };
     char	*newDir;
-    int		i, newRld;
+    int		newRld, i;
 
     /*
      *	Handle Reload signal setup/update
      */
-    if (nv != NULL)	/* task 1 */
+    if (nv != NULL)	/* task 1 or 3 */
     {
 	newDir = ValSessDir(nv) != STRIVAL ? ValSessDir(nv) : g->DefSessDir;
 
-	if (access(newDir, R_OK|X_OK) != 0)	/* SessDir not usablae */
+	if (access(newDir, R_OK|X_OK) != 0)	/* SessDir not usable */
 	{
 	    char    refDir[32];
 
@@ -1165,14 +1494,26 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 	    else
 		strcpy(refDir, "default");
 
-	    if (g->SessDir == STRIVAL)
-	        errexit(EX_CONF, 0, "in file %s, %s (%s) value \"%s\" is not a usable directory",
-		    g->cfg_path, g->VarSessDir, refDir, newDir);
+	    if (g->SessDir == STRIVAL)			/* task 1 */
+	        errexit(EX_CONF, errno, "in file %s, %s (%s) value \"%s\" is unusable",
+		    base_name(g->cfg_path), g->VarSessDir, refDir, newDir);
+
+	    if (strcmp(g->SessDir, newDir) != 0)	/* task 3 */
+	    {
+		error(errno, "discarding unusable value \"%s\" of %s (%s) in file %s", newDir, g->VarSessDir, refDir, base_name(g->cfg_path));
+		if (ValSessDir(nv) != STRIVAL)
+		    xfree(ValSessDir(nv));
+		ValSessDir(nv) = xstrdup(g->SessDir);
+	    }
+	    newDir = STRIVAL;
 	}
 	if (g->SessDir == STRIVAL)	/* task 1 check completed */
 	    return 0;
 
 	/* task 3: apply update */
+	if (newDir != STRIVAL && chdir(newDir) < 0)
+	    error(errno, "chdir(\"%s\")", newDir);
+
 	newRld = ValReload(nv) != NUMIVAL ? ValReload(nv) : g->DefReload;
 	if (newRld == g->SigReload)
 		return 0;	/* No change needed in sig setup */
@@ -1194,7 +1535,11 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 	}
 	return 0;
     }
+
     /* task 2: apply setup */
+    if (chdir(g->SessDir) < 0)
+	error(errno, "chdir to \"%s\"", g->SessDir);
+
     for (i = 0; i < sizeof traps / sizeof(struct trap); i++)
     {
 	if (traps[i].sig != g->SigReload)
@@ -1223,14 +1568,20 @@ void 		terminate(int sig)
     globals.loop = 0;	/* exit on SIGTERM */
 }
 
+void		onexit()
+{
+    if (!isatty(fileno(stdin)))
+	usleep(500 * 1000);
+}
+
 int		main(int ac, char **av)
 {
     glob_t	*g = &globals;
 
+    atexit(onexit);
     parse_args(g, ac, av);
     conf_init(g);
     get_cfgpath(g);
-    //g->TraceLevel = 15;
     if (!parse_conf(g, apply_conf, set_glob))
 	return EX_CONF;
 
@@ -1248,21 +1599,32 @@ int		main(int ac, char **av)
     apply_conf(g, NULL);
 
     setlinebuf(stdout);
-    setup_loop(g);
-    g->loop = 1;
+    if (setup_loop(g))
+	g->loop = 1;
 
     while (g->loop)
     {
-	report_sessions(g);
-	watch_sessions(g);
+	if (g->allevt)
+	{
+	    timeval_t	left;
 
+	    left.tv_sec = 0;	/* Do not time-out */
+	    left.tv_usec = 0;
+	    handle_events(g, &left);
+	}
+	else
+	{
+	    report_sessions(g);
+	    watch_sessions(g);
+	}
 	if (g->sig > 0)
 	{
 	    if (g->sig == g->SigReload)
 	    {
 		if (parse_conf(g, apply_conf, set_glob))
 		{
-		    close(g->iwd);
+		    if (inotify_rm_watch(g->ifd, g->iwd) < 0)
+			error(errno, "inotify_rm_watch");
 		    close(g->ifd);
 		    g->sessions = xfree(g->sessions);
 		    setup_loop(g);
@@ -1275,3 +1637,4 @@ int		main(int ac, char **av)
 
     return EX_OK;
 }
+/*} End program start/end */
