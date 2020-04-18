@@ -147,7 +147,7 @@ Le fichier de configuration standard fourni indique en commentaire chaque param�
   
 
 ### Paramètres du compteur
-- `sess_dir (par défaut : `/var/lib/php/sessions`)  
+- `sess_dir` (par défaut : `/var/lib/php/sessions`)  
   Le chemin (en général absolu) du répertoire dont la surveillance est l'objet de ce projet
 - `max_sess_size` (par défaut : 16384)  
   Nombre maximum de sessions **actives**.
@@ -172,22 +172,22 @@ Pour rappel, les paramètres suivants, déjà expliqués, sont également reconn
   
 
 ### Paramètres du script-shell
-- `report_curl (par défaut : y)  
+- `report_curl` (par défaut : `y`)  
   Active le rapport par `curl` vers `nbphpsess.php` (via Apache)
-- `report_url (par défaut : 'https://`hostname`.voozanoo.net/localapc')  
+- `report_url` (par défaut : '`https://`hostname`.voozanoo.net/localapc'`)  
   L'URL pour accéder à la page nbsessphp.php
-- `ldavg_method (par défaut : php)  
+- `ldavg_method` (par défaut : `php`)  
   Si 'php', la charge moyenne (`load average`) du système est lue depuis PHP  
   Si 'sh', elle est lue par la commande `uptime` dans le script-shell
-- `curl_timeout (par défaut : 20)  
+- `curl_timeout` (par défaut : `20`)  
   Paramètre pour l'option `-m / --max-time` de curl (timeout)
-- `report_file (par défaut : '')  
+- `report_file` (par défaut : `''`)  
   Si défini indique le chemin d'un fichier ou sera écrit le nombre de sessions
   
 Et pour rappel, ce paramètre également utilisé par le `daemon` et le compteur
-- `conf_reload_sig (par défaut : USR1)  
+- `conf_reload_sig` (par défaut : USR1)  
   Pour le rechargement de configuration
-- `report_freq (par défaut : 5)  
+- `report_freq` (par défaut : 5)  
   Pour vérifier faut s'il jeter des valeurs de nombres de session du fait du retard pris par curl.
 
 
