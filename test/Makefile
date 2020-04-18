@@ -13,4 +13,5 @@ clean:
 	rm -f core *.o $(BINS)
 
 purge:
-	rm -f core *.o $(BINS) nbphpsessd nbphpsess
+	test -x nbphpsessd && ./nbphpsessd -k; \
+	rm -f core *.o $(BINS) *.log *.pid nbphpsessd nbphpsess

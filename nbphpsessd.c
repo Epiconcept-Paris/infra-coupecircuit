@@ -33,6 +33,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/select.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 
 /* Exit codes */
@@ -54,6 +55,7 @@
 #define TL_CONF		1
 #define TL_EXEC		2
 #define TL_LOGS		4
+#define TL_DEBUG	8
 
 /* global config errors */
 #define ERR_CFG_NUM	1
@@ -126,6 +128,10 @@ typedef	struct	glob_s		/* global variables */
 #   define NB_CFGVARS	13
     cfgvar_t	config[NB_CFGVARS];	/* Must be 1st member for init */
 
+    char	*cfg_arg;
+    char	*cfg_path;
+    int		cfgerr;
+
     char	*prg;		/* basename from av[0] */
     char	*prg_dir;
 
@@ -144,10 +150,6 @@ typedef	struct	glob_s		/* global variables */
     char	*log_arg;
     char	*log_path;
     FILE	*log_fp;
-
-    char	*cfg_arg;
-    char	*cfg_path;
-    int		cfgerr;
 
     char	*pid_path;
     bool	kill_prg;
@@ -202,6 +204,7 @@ glob_t		globals = {
 #	define RefReload	config[11].line
 #	define RefRotate	config[12].line
 
+#	define ValTraceLevel(v)	v[0].i
 #	define ValWorkDir(v)	v[4].s
 #	define ValReload(v)	v[11].i
 #	define ValRotate(v)	v[12].i
@@ -270,12 +273,16 @@ static char	*tstamp(time_t t, char *sep)	/* Only for loglines() just below */
 {
     static char	buf[32];
     struct tm	*tp;
+    timeval_t	tv;
+    int		len;
 
     if (t == 0)
-	t = time(NULL);
-    tp = localtime(&t);
-    snprintf(buf, sizeof buf, "%04d-%02d-%02d%s%02d:%02d:%02d",
+	gettimeofday(&tv, NULL);
+    tp = localtime(t == 0 ? &tv.tv_sec : &t);
+    len = snprintf(buf, sizeof buf, "%04d-%02d-%02d%s%02d:%02d:%02d",
 	 tp->tm_year + 1900, tp->tm_mon + 1, tp->tm_mday, sep, tp->tm_hour, tp->tm_min, tp->tm_sec);
+    if (globals.TraceLevel > 0)
+	len += snprintf(buf + len, sizeof buf - len, ".%03ld", t == 0 ? tv.tv_usec / 1000 : 0);
 
     return buf;
 }
@@ -290,11 +297,11 @@ static char	fd_type(int fd)
 	char	type;
     }		tbl[] = {
 	{ S_IFSOCK,	's' },	/* socket */
-	{ S_IFLNK,	'l' },	/* symlink (never: needs lstat() */
+	{ S_IFLNK,	'l' },	/* symlink (never: would need lstat() */
 	{ S_IFREG,	'f' },	/* file */
 	{ S_IFBLK,	'b' },	/* bdev (unlikely) */
 	{ S_IFDIR,	'd' },	/* dir */
-	{ S_IFCHR,	'c' },	/* cdev (including tty) */
+	{ S_IFCHR,	'c' },	/* cdev (most probably tty) */
 	{ S_IFIFO,	'p' }	/* pipe (or fifo) */
     };
     static char	ift = '\0';
@@ -321,19 +328,24 @@ static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
     bool	log = (globals.log_fp != NULL);
     FILE	*fp = log ? globals.log_fp : stderr;
     char	*line, *p, ft = fd_type(fileno(fp));
-    int		nl = 0;
+    int		nl;
 
     if (*msg == '\0')
 	return;
 
+    nl = 0;
     p = msg;
     while ((line = strsep(&p, "\r\n")) != NULL)
     {
-	if (*line == '\0')
+	if (*line == '\0')	/* discard empty lines */
 	    continue;
+
+	/* prefix for all lines */
 	if (log || ft == 'f')
 	    fprintf(fp, "%s\t", tstamp(0, " "));
-	if (nl == 0)
+
+	/* prefixes */
+	if (nl == 0)		/* 1st line */
 	{
 	    if (!log && ft == 'c')
 	    {
@@ -346,17 +358,18 @@ static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
 		fprintf(fp, "%s:%d ", fn, ln);
 	    else if (*tag != '\0')	/* all others but info */
 		fputs(tag, fp);
-
-	    fputs(line, fp);
-
-	    if (syserr > 0)
-		fprintf(fp, ": %s (errno=%d)\n", strerror(syserr), syserr);
-	    else
-		fputc('\n', fp);
 	}
 	else
-	    fprintf(fp, "    %s\n", line);
+	    fputs("    ", fp);	/* 4 spaces */
 
+	/* line as received */
+	fputs(line, fp);
+
+	/* suffix for 1st line: possible system error */
+	if (nl == 0 && syserr > 0)
+	    fprintf(fp, ": %s (errno=%d)\n", strerror(syserr), syserr);
+
+	fputc('\n', fp);
 	fflush(fp);
 	nl++;
     }
@@ -481,6 +494,17 @@ static char	*getfile(char *path, int *plen)
 	xfree(big);
 
     return NULL;
+}
+
+/*
+ *  Set non-blocking mode on fd
+ */
+static void	set_nonblock(int fd)
+{
+    int		arg;
+
+    if ((arg = fcntl(fd, F_GETFL, NULL)) < 0 || fcntl(fd, F_SETFL, arg | O_NONBLOCK) < 0)
+	error(errno, "fcntl");
 }
 
 /*
@@ -1537,29 +1561,59 @@ int		prepare_fdset(glob_t *g, fd_set *readfd)
 
 void		get_put_log(FILE **from, FILE *to, char *name, char *tag)
 {
-    char	buf[LOG_BUF_SIZE];
+    char	buf[LOG_BUF_SIZE], *eol;
     int		in, out;
+    int		all = 0, loops = 0, empty = 0, nonl = 0, nlonly = 0;
 
     trace(TL_LOGS, "%s %s", name, tag);
-    in = 0;
-    buf[0] = '\0';
-    if (fgets(buf, sizeof buf, *from) != NULL)
+    while (fgets(buf, sizeof buf, *from) != NULL)
     {
-	in = strlen(buf);
-	out = fprintf(to, "%s %s %s: %s", tstamp(0, " "), name, tag, buf);
-	fflush(to);
-	trace(TL_LOGS, "from %d bytes on fd=%d to %d bytes on fd=%d",
-	    in, fileno(*from), out, fileno(to));
-	return;
+	loops++;
+	if ((in = strlen(buf)) == 0)	/* ignore empty lines */
+	{
+	    empty++;
+	    continue;
+	}
+	/* so in > 0 */
+	all += in;
+	if (buf[0] == '\n' && in == 1)	/* ignore lines with NL only */
+	{
+	    nlonly++;
+	    continue;
+	}
+	if (buf[in - 1] != '\n')	/* add NL if missing at end */
+	{
+	    eol = "\n";
+	    nonl++;
+	}
+	else
+	    eol = "";
+
+	out = fprintf(to, "%s %s %s: %s%s", tstamp(0, " "), name, tag, buf, eol);
+	trace(TL_LOGS, "from fd=%d: %d bytes to fd=%d: %d bytes", fileno(*from), in, fileno(to), out);
     }
+    fflush(to);
+    if (loops > 1 || all == 0 || empty > 0 || nlonly > 0 || nonl > 0)
+	trace(TL_DEBUG, "%d %s-%s fgets loops (all=%d), empty:%d nlonly:%d nonl:%d", loops, name, tag, all, empty, nlonly, nonl);
 
     /* eof or error */
-    if (feof(*from))
-	warn("EOF from %s %s fd=%d", name, tag, fileno(*from));
-    else if (ferror(*from))
+    if (ferror(*from))
+    {
+	if (errno == EAGAIN)
+	{
+	    clearerr(*from);
+	    return;
+	}
 	error(errno, "error reading %s %s fd=%d", name, tag, fileno(*from));
+    }
+    else if (feof(*from))
+    {
+	if (globals.loop > 0)
+	    warn("EOF from %s %s fd=%d", name, tag, fileno(*from));
+    }
     else
-	error(0, "unexpected error from %s %s fd=%d", name, tag, fileno(*from));
+	warn("unexpected error from %s %s fd=%d", name, tag, fileno(*from));
+
     fclose(*from);
     *from = NULL;
 }
@@ -1570,8 +1624,8 @@ void		handle_logs(glob_t *g)
     fd_set	readfd;
     int		ret, max;
 
-    timeout.tv_sec  = g->LogWait;
-    timeout.tv_usec = 0;
+    timeout.tv_sec  = g->loop > 0 ? g->LogWait : 0;
+    timeout.tv_usec = g->loop > 0 ? 0 : (500 * 1000);
     max = prepare_fdset(g, &readfd);
     if (max == 0)
 	timeout.tv_sec = 1;
@@ -1851,6 +1905,8 @@ void		handle_children(glob_t *g)
 	    cp->err_fp = fdopen(dup(pipes[2]), "r");
 	    close(pipes[2]);
 	    close(pipes[3]);
+
+	    set_nonblock(fileno(cp->err_fp));
 	    trace(TL_LOGS, "%s stderr will be received on fd=%d", cp->name, fileno(cp->err_fp));
 	}
 	if (i == 1)
@@ -1861,6 +1917,9 @@ void		handle_children(glob_t *g)
 	    cp->err_fp = fdopen(dup(pipes[6]), "r");
 	    close(pipes[6]);
 	    close(pipes[7]);
+
+	    set_nonblock(fileno(cp->out_fp));
+	    set_nonblock(fileno(cp->err_fp));
 	    trace(TL_LOGS, "%s stdout will be received on fd=%d", cp->name, fileno(cp->out_fp));
 	    trace(TL_LOGS, "%s stderr will be received on fd=%d", cp->name, fileno(cp->err_fp));
 	}
@@ -1911,22 +1970,25 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 	newRld = ValReload(nv) != NUMIVAL ? ValReload(nv) : g->DefReload;
 	newRot = ValRotate(nv) != NUMIVAL ? ValRotate(nv) : g->DefRotate;
 
+	/*  Keep TraceLevel from command line until config-reload */
+	if (g->SigReload == NUMIVAL && g->TraceLevel != NUMIVAL)
+	    ValTraceLevel(nv) = g->TraceLevel;
+
 	if (access(newDir, R_OK|X_OK) != 0)	/* WorkDir not usable */
 	{
-	    char    refDir[32];
+	    char    *fmt;
 
 	    if (g->RefWorkDir > 0)
-		snprintf(refDir, sizeof refDir, "line %d", g->RefWorkDir);
+		fmt = "%s %s=\"%s\" from %s line %d";
 	    else
-		strcpy(refDir, "default");
+		fmt = "%s default %s=\"%s\" (unassigned in %s)";
 
 	    if (g->WorkDir == STRIVAL)			/* task 1 */
-	        errexit(EX_CONF, errno, "in file %s, %s (%s) value \"%s\" is unusable",
-		    base_name(g->cfg_path), g->VarWorkDir, refDir, newDir);
+		errexit(EX_CONF, errno, fmt, "cannot access", g->VarWorkDir, newDir, base_name(g->cfg_path), g->RefWorkDir);
 
 	    if (strcmp(g->WorkDir, newDir) != 0)	 /* task 3 */
 	    {
-		error(errno, "discarding unusable value \"%s\" of %s (%s) in file %s", newDir, g->VarWorkDir, refDir, base_name(g->cfg_path));
+		error(errno, fmt, "discarding inaccessible", g->VarWorkDir, newDir, base_name(g->cfg_path), g->RefWorkDir);
 		if (ValWorkDir(nv) != STRIVAL)
 		    xfree(ValWorkDir(nv));
 		ValWorkDir(nv) = xstrdup(g->WorkDir);
@@ -2138,6 +2200,8 @@ int		main(int ac, char **av)
 		g->sig = 0;
 	    }
 	}
+	usleep(500 * 1000);
+	handle_logs(g);
 	info("exit from main loop (=%d)", g->loop);
     }
     else if (pid > 0)

@@ -133,7 +133,7 @@ typedef	struct	glob_s		/* global variables */
     char	*prg;		/* basename from av[0] */
     char	*prg_dir;
 
-    char	*pkg;		/* our package name */
+    char	*pkg;		/* our package name (= prg) */
 
     int		ifd;
     int		iwd;
@@ -184,6 +184,7 @@ glob_t		globals = {
 #	define RefSessDir	config[1].line
 #	define RefReload	config[8].line
 
+#	define ValTraceLevel(v)	v[0].i
 #	define ValSessDir(v)	v[1].s
 #	define ValReload(v)	v[8].i
 
@@ -213,6 +214,7 @@ glob_t		globals = {
 	{ "conf_reload_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR1 },	0, {},
 				"conf-reload signal (SIGxxx also accepted)" }
     },
+    /* Make sur these match struct glob_s ! */
     NULL, NULL, 0, NULL, NULL, NULL, -1, -1
 };
 /*} End init globals */
@@ -244,12 +246,16 @@ static char	*tstamp(time_t t, char *sep)	/* Only for loglines() just below */
 {
     static char	buf[32];
     struct tm	*tp;
+    timeval_t	tv;
+    int		len;
 
     if (t == 0)
-	t = time(NULL);
-    tp = localtime(&t);
-    snprintf(buf, sizeof buf, "%04d-%02d-%02d%s%02d:%02d:%02d",
+	gettimeofday(&tv, NULL);
+    tp = localtime(t == 0 ? &tv.tv_sec : &t);
+    len = snprintf(buf, sizeof buf, "%04d-%02d-%02d%s%02d:%02d:%02d",
 	 tp->tm_year + 1900, tp->tm_mon + 1, tp->tm_mday, sep, tp->tm_hour, tp->tm_min, tp->tm_sec);
+    if (globals.TraceLevel > 0)
+	len += snprintf(buf + len, sizeof buf - len, ".%03ld", t == 0 ? tv.tv_usec / 1000 : 0);
 
     return buf;
 }
@@ -264,11 +270,11 @@ static char	fd_type(int fd)
 	char	type;
     }		tbl[] = {
 	{ S_IFSOCK,	's' },	/* socket */
-	{ S_IFLNK,	'l' },	/* symlink (never: needs lstat() */
+	{ S_IFLNK,	'l' },	/* symlink (never: would need lstat() */
 	{ S_IFREG,	'f' },	/* file */
 	{ S_IFBLK,	'b' },	/* bdev (unlikely) */
 	{ S_IFDIR,	'd' },	/* dir */
-	{ S_IFCHR,	'c' },	/* cdev (including tty) */
+	{ S_IFCHR,	'c' },	/* cdev (most probably tty) */
 	{ S_IFIFO,	'p' }	/* pipe (or fifo) */
     };
     static char	ift = '\0';
@@ -295,19 +301,24 @@ static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
     bool	log = (globals.log_fp != NULL);
     FILE	*fp = log ? globals.log_fp : stderr;
     char	*line, *p, ft = fd_type(fileno(fp));
-    int		nl = 0;
+    int		nl;
 
     if (*msg == '\0')
 	return;
 
+    nl = 0;
     p = msg;
     while ((line = strsep(&p, "\r\n")) != NULL)
     {
-	if (*line == '\0')
+	if (*line == '\0')	/* discard empty lines */
 	    continue;
+
+	/* prefix for all lines */
 	if (log || ft == 'f')
 	    fprintf(fp, "%s\t", tstamp(0, " "));
-	if (nl == 0)
+
+	/* prefixes */
+	if (nl == 0)		/* 1st line */
 	{
 	    if (!log && ft == 'c')
 	    {
@@ -320,17 +331,18 @@ static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
 		fprintf(fp, "%s:%d ", fn, ln);
 	    else if (*tag != '\0')	/* all others but info */
 		fputs(tag, fp);
-
-	    fputs(line, fp);
-
-	    if (syserr > 0)
-		fprintf(fp, ": %s (errno=%d)\n", strerror(syserr), syserr);
-	    else
-		fputc('\n', fp);
 	}
 	else
-	    fprintf(fp, "    %s\n", line);
+	    fputs("    ", fp);	/* 4 spaces */
 
+	/* line as received */
+	fputs(line, fp);
+
+	/* suffix for 1st line: possible system error */
+	if (nl == 0 && syserr > 0)
+	    fprintf(fp, ": %s (errno=%d)\n", strerror(syserr), syserr);
+
+	fputc('\n', fp);
 	fflush(fp);
 	nl++;
     }
@@ -1485,22 +1497,25 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
     {
 	newDir = ValSessDir(nv) != STRIVAL ? ValSessDir(nv) : g->DefSessDir;
 
+	/*  Keep TraceLevel from command line until config-reload */
+	if (g->SigReload == NUMIVAL && g->TraceLevel != NUMIVAL)
+	    ValTraceLevel(nv) = g->TraceLevel;
+
 	if (access(newDir, R_OK|X_OK) != 0)	/* SessDir not usable */
 	{
-	    char    refDir[32];
+	    char    *fmt;
 
 	    if (g->RefSessDir > 0)
-		snprintf(refDir, sizeof refDir, "line %d", g->RefSessDir);
+		fmt = "%s %s=\"%s\" from %s line %d";
 	    else
-		strcpy(refDir, "default");
+		fmt = "%s default %s=\"%s\" (unassigned in %s)";
 
 	    if (g->SessDir == STRIVAL)			/* task 1 */
-	        errexit(EX_CONF, errno, "in file %s, %s (%s) value \"%s\" is unusable",
-		    base_name(g->cfg_path), g->VarSessDir, refDir, newDir);
+		errexit(EX_CONF, errno, fmt, "cannot access", g->VarSessDir, newDir, base_name(g->cfg_path), g->RefSessDir);
 
 	    if (strcmp(g->SessDir, newDir) != 0)	/* task 3 */
 	    {
-		error(errno, "discarding unusable value \"%s\" of %s (%s) in file %s", newDir, g->VarSessDir, refDir, base_name(g->cfg_path));
+		error(errno, fmt, "discarding inaccessible", g->VarSessDir, newDir, base_name(g->cfg_path), g->RefSessDir);
 		if (ValSessDir(nv) != STRIVAL)
 		    xfree(ValSessDir(nv));
 		ValSessDir(nv) = xstrdup(g->SessDir);

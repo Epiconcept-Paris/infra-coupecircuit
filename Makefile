@@ -13,4 +13,4 @@ all:	$(BINS)
 	done
 
 clean:
-	rm -f core *.o $(BINS); cd test && $(MAKE) clean
+	rm -f core *.o $(BINS); cd test && $(MAKE) purge
