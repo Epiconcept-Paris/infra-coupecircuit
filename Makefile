@@ -3,8 +3,8 @@
 #
 BINS = nbphpsessd nbphpsess
 
-CFLAGS	= -Wall -ggdb -fsanitize=address -fno-omit-frame-pointer
-#CFLAGS	= -O -Wall
+#CFLAGS	= -Wall -fsanitize=address -fno-omit-frame-pointer
+CFLAGS	= -O -Wall
 #LDFLAGS	= -s
 
 all:	$(BINS)
