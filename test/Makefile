@@ -1,17 +1,24 @@
 #
 #	Makefile for BINS binaries
 #
+#	Use: make debug to make debug-version of executables
+#
 BINS = modif
 
-#CFLAGS	= -Wall -ggdb -o -fsanitize=address -fno-omit-frame-pointer
-CFLAGS	= -O -Wall
-LDFLAGS	= -s
+prod:	CFLAGS	= -O -Wall
+prod:	LDFLAGS	= -s
+
+debug:	CFLAGS	= -Wall -fno-omit-frame-pointer -fsanitize=address -static-libasan
+
+prod debug: all
 
 all:	$(BINS)
 
 clean:
-	rm -f core *.o $(BINS)
+	rm -f $(BINS) core *.o
 
 purge:
-	test -x nbphpsessd && ./nbphpsessd -k; \
-	rm -f core *.o $(BINS) *.log *.pid nbphpsessd nbphpsess
+	test -x nbphpsessd && ./nbphpsessd -k 2>/dev/null; \
+	rm -f $(BINS) core *.o *.log *.pid nbphpsessd nbphpsess
+
+.PHONY: prod debug all clean purge
