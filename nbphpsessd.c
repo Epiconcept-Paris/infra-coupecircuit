@@ -463,7 +463,7 @@ static char	*getfile(char *path, int *plen)
 {
     struct stat	st;
     char	buf[LOG_BUF_SIZE], *big = NULL;
-    int		fd, len, sz = sizeof buf;
+    int		fd, len = 0, sz = sizeof buf;
 
     /* local buffer is used to read /proc file that have size=0 */
     if ((fd = open(path, O_RDONLY)) >= 0)
@@ -628,7 +628,7 @@ static void	get_cfgpath(glob_t *g)
 
     if (g->cfg_arg != NULL)	/* Was set by parse_args */
     {
-	char	real[PATH_MAX], *bad;
+	char	real[PATH_MAX], *bad = NULL;
 
 	if (g->cfg_arg[0] == '/')
 	{
@@ -1846,10 +1846,10 @@ void		handle_children(glob_t *g)
 	fclose(g->rep_fp);
 	fclose(g->log_fp);
     }
+    fd0 = -1; fd1 = -1; fd2 = -1;
     if (I == 1)		/* Child 0 */
     {
 	/* stdin:-, stdout:1, stderr:3 */
-	fd0 = -1;
 	fd1 = dup(pipes[1]);
 	fd2 = dup(pipes[3]);
     }

@@ -5,7 +5,7 @@ BINS = nbphpsessd nbphpsess
 
 #CFLAGS	= -Wall -fsanitize=address -fno-omit-frame-pointer
 CFLAGS	= -O -Wall
-#LDFLAGS	= -s
+LDFLAGS	= -s
 
 all:	$(BINS)
 	@for f in $(BINS); do \
