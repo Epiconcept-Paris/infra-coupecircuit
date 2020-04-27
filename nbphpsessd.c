@@ -367,7 +367,7 @@ static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
 
 	/* suffix for 1st line: possible system error */
 	if (nl == 0 && syserr > 0)
-	    fprintf(fp, ": %s (errno=%d)\n", strerror(syserr), syserr);
+	    fprintf(fp, ": %s (errno=%d)", strerror(syserr), syserr);
 
 	fputc('\n', fp);
 	fflush(fp);

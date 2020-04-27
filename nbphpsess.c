@@ -123,7 +123,7 @@ typedef struct	sess_s
 
 typedef	struct	glob_s		/* global variables */
 {
-#   define NB_CFGVARS	9
+#   define NB_CFGVARS	10
     cfgvar_t	config[NB_CFGVARS];	/* Must be 1st member for init */
 
     char	*cfg_arg;
@@ -171,27 +171,29 @@ glob_t		globals = {
 #	define SessPrefix	config[3].val.s
 #	define SessMinSize	config[4].val.i
 #	define SessMaxAge	config[5].val.i
-#	define ActiveStr	config[6].val.s
-#	define ReportFreq	config[7].val.i
-#	define SigReload	config[8].val.i
+#	define SessList		config[6].val.s
+#	define ActiveStr	config[7].val.s
+#	define ReportFreq	config[8].val.i
+#	define SigReload	config[9].val.i
 
 #	define VarSessDir	config[1].name
-#	define VarReload	config[8].name
+#	define VarReload	config[9].name
 
 #	define DefSessDir	config[1].def.s
-#	define DefReload	config[8].def.i
+#	define DefReload	config[9].def.i
 
 #	define RefSessDir	config[1].line
-#	define RefReload	config[8].line
+#	define RefReload	config[9].line
 
 #	define ValTraceLevel(v)	v[0].i
 #	define ValSessDir(v)	v[1].s
-#	define ValReload(v)	v[8].i
+#	define ValReload(v)	v[9].i
 
 #	define CFG_IVALS	{ \
 	{.i=NUMIVAL}, {.s=STRIVAL},\
 	{.i=NUMIVAL}, {.s=STRIVAL},\
-	{.i=NUMIVAL}, {.i=NUMIVAL}, {.s=STRIVAL},\
+	{.i=NUMIVAL}, {.i=NUMIVAL},\
+	{.s=STRIVAL}, {.s=STRIVAL},\
 	{.i=NUMIVAL}, {.i=NUMIVAL}\
     }
     {
@@ -207,6 +209,8 @@ glob_t		globals = {
 				"ignore sessions files smaller than this bytes" },
 	{ "sess_maxage",	1, 1, intv, { .i = NUMIVAL },	{ .i = 1800 },		0, {},
 				"ignore sessions files older than this seconds" },
+	{ "sess_list",		1, 0, NULL, { .s = STRIVAL },	{ .s = "" },		0, {},
+				"dump session filenames to this file if empty" },
 	{ "active_string",	1, 0, NULL, { .s = STRIVAL },	{ .s = "s:15:\"iConnectionType\";" }, 0, {},
 				"ignore sessions files not containing this" },
 	{ "report_freq",	1, 1, intv, { .i = NUMIVAL },	{ .i = 5 },		0, {},
@@ -340,7 +344,7 @@ static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
 
 	/* suffix for 1st line: possible system error */
 	if (nl == 0 && syserr > 0)
-	    fprintf(fp, ": %s (errno=%d)\n", strerror(syserr), syserr);
+	    fprintf(fp, ": %s (errno=%d)", strerror(syserr), syserr);
 
 	fputc('\n', fp);
 	fflush(fp);
@@ -1149,6 +1153,7 @@ int		find_session(glob_t *g, char *name)
 
     if (g->allevt)
 	return -1;
+
     for (i = 0; i < g->MaxActive; i++)
     {
 	sp = &g->sessions[i];
@@ -1173,6 +1178,7 @@ void		add_session(glob_t *g, char *name, time_t mtime)
 
     if (g->allevt)
 	return;
+
     if ((i = find_session(g, name)) < 0)	/* not in list yet */
     {
 	if ((i = find_session(g, NULL)) < 0)	/* find empty slot */
@@ -1204,6 +1210,56 @@ int		delete_session(glob_t *g, char *name)
 	trace(TL_EVNT, "removed session %s from active-list (i=%d)", name, i);
     }
     return i;
+}
+
+/* Dump session list to empty file */
+void		dump_session_list(glob_t *g)
+{
+    sess_t	*sp;
+    char	*buf;
+    int		i, sz = 0, len = 0, nb = 0, fd;
+
+    if (g->allevt)
+	return;
+
+    info("dumping session-list to %s", g->SessList);
+    for (i = 0; i < g->MaxActive; i++)
+    {
+	sp = &g->sessions[i];
+
+	if (sp->name[0] != '\0')
+	{
+	    sz += g->pfx_len + strlen(sp->name) + 1;
+	    nb++;
+	}
+    }
+    buf = xmalloc(sz + 1);	/* +1 for final snprintf NUL */
+
+    for (i = 0; i < g->MaxActive; i++)
+    {
+	sp = &g->sessions[i];
+
+	if (sp->name[0] != '\0')
+	    len += snprintf(buf + len, sz + 1 - len, "%s%s\n", g->SessPrefix, sp->name);
+    }
+    if (len != sz)
+	warn("len=%d != sz=%d in %s ??", len, sz, __FUNCTION__);
+
+    if ((fd = open(g->SessList, O_WRONLY)) >= 0)
+    {
+	if ((sz = write(fd, buf, len)) < 0)
+	    error(errno, "write %d bytes to %s", len, g->SessList);
+	else if (sz != len)
+	    warn("could only write %d/%d bytes to %s ?", sz, len, g->SessList);
+	else
+	    info("dumped %d active-session filenames to %s", nb, g->SessList);
+
+	close(fd);
+    }
+    else
+	error(errno, "open %s for writing", g->SessList);
+
+    xfree(buf);
 }
 
 /*
@@ -1295,7 +1351,7 @@ bool		setup_loop(glob_t *g)
 	g->loop = -1;
 	return false;
     }
-    if ((g->iwd = inotify_add_watch(g->ifd, ".", g->allevt ? IN_ALL_EVENTS : (IN_MODIFY|IN_DELETE))) < 0)
+    if ((g->iwd = inotify_add_watch(g->ifd, ".", g->allevt ? IN_ALL_EVENTS : (IN_MODIFY|IN_CLOSE_WRITE|IN_DELETE))) < 0)
     {
 	error(errno, "inotify_add_watch \".\"");
 	g->loop = -1;
@@ -1357,10 +1413,22 @@ void		handle_events(glob_t *g, timeval_t *timeout)
 
 	    if (g->allevt)
 	    {
-		info("wd=%d cookie=%d mask=%-13s len=%d file=\"%s\"", evp->wd, evp->cookie, evt, evp->len, file);
+		int	ret = evp->len > 0 ? stat(file, &st) : 1;
+
+		if (ret < 0)
+		{
+		    if (errno == ENOENT)
+			info("wd=%d cookie=%d mask=%-13s len=%d file=\"%s\" (not found)", evp->wd, evp->cookie, evt, evp->len, file);
+		    else
+			error(errno, "cannot stat %s", file);
+		}
+		else if (ret == 0)
+		    info("wd=%d cookie=%d mask=%-13s len=%d file=\"%s\" size=%zd age=%d", evp->wd, evp->cookie, evt, evp->len, file, st.st_size, time(NULL) - st.st_mtime);
+		else
+		    info("wd=%d cookie=%d mask=%-13s len=%d file=\"\"", evp->wd, evp->cookie, evt, evp->len);
 		continue;
 	    }
-	    if ((evp->mask & (IN_MODIFY|IN_DELETE)))
+	    if ((evp->mask & (IN_MODIFY|IN_CLOSE_WRITE|IN_DELETE)))
 	    {
 		if (evp->len <= 0)
 		{
@@ -1371,27 +1439,41 @@ void		handle_events(glob_t *g, timeval_t *timeout)
 
 	    if ((evp->mask & IN_MODIFY))
 	    {
-		if (stat(file, &st) < 0)
-		{
-		    error(errno, "mask=%s but cannot stat \"%s\"", evt, file);
-		    continue;
-		}
 		if (is_session(g, file))
 		{
-		    if ((mtime = check_session(g, file, &st)) > 0)
+		    if (stat(file, &st) == 0)
 		    {
-			if (active_session(g, file))		/* may already be active */
+			if ((mtime = check_session(g, file, &st)) > 0)
 			{
-			    add_session(g, file + g->pfx_len, mtime);
-			    continue;
+			    if (active_session(g, file))		/* may already be active */
+			    {
+				add_session(g, file + g->pfx_len, mtime);
+				continue;
+			    }
 			}
+			/* too small or no more active */
+			if (delete_session(g, file + g->pfx_len) < 0)	/* may do nothing */
+			    trace(TL_EVNT, "file %s modified but still not active", file);
 		    }
-		    /* too small or no more active */
-		    if (delete_session(g, file + g->pfx_len) < 0)	/* may do nothing */
-			trace(TL_EVNT, "file %s modified but still not active", file);
+		    else
+			error(errno, "mask=%s but cannot stat \"%s\"", evt, file);
 		}
 		else
 		    trace(TL_EVNT, "ignoring %s file=%s size=%d mtime=%s", evt, file, st.st_size, hstamp(st.st_mtime));
+	    }
+
+	    if ((evp->mask & IN_CLOSE_WRITE))
+	    {
+ 		if (g->SessList != STRIVAL && g->SessList[0] != '\0' && strcmp(file, g->SessList) == 0)
+		{
+		    if (stat(file, &st) == 0)
+		    {
+			if (st.st_size == 0 && (time(NULL) - st.st_mtime) < 2)
+			    dump_session_list(g);
+		    }
+		    else
+			error(errno, "mask=%s but cannot stat \"%s\"", evt, file);
+		}
 	    }
 
 	    if ((evp->mask & IN_DELETE))
