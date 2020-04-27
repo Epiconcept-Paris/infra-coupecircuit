@@ -1190,7 +1190,7 @@ void		add_session(glob_t *g, char *name, time_t mtime)
 	}
 	sp = &g->sessions[i];
 	trace(TL_EVNT, "adding to active-list (i=%d) new session %s", i, name);
-	snprintf(sp->name, sizeof sp->name, name);
+	snprintf(sp->name, sizeof sp->name, "%s", name);
     }
     else
     {
