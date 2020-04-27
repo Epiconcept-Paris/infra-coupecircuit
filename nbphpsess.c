@@ -177,6 +177,7 @@ glob_t		globals = {
 #	define SigReload	config[9].val.i
 
 #	define VarSessDir	config[1].name
+#	define VarMaxActive	config[2].name
 #	define VarReload	config[9].name
 
 #	define DefSessDir	config[1].def.s
@@ -1343,7 +1344,10 @@ char		*event_mask(int mask)
 
 bool		setup_loop(glob_t *g)
 {
-    info("Watching directory \"%s\"", g->SessDir);
+    if (g->allevt)
+	info("Watching directory \"%s\"", g->SessDir);
+    else
+	info("Watching directory \"%s\" %s=%d", g->SessDir, g->VarMaxActive, g->MaxActive);
 
     if ((g->ifd = inotify_init()) < 0)
     {
