@@ -1,0 +1,15 @@
+[Unit]
+Description=PHP session counter
+Requires=network.target
+After=syslog.target network.target
+
+[Service]
+Type=forking
+User=root
+ExecStart=/usr/local/bin/nbphpsessd -r report.log
+ExecStop=/usr/local/bin/nbphpsessd -k
+PIDFile=/run/nbphpsess/nbphpsessd.pid
+TimeoutStartSec=30s
+
+[Install]
+WantedBy=multi-user.target

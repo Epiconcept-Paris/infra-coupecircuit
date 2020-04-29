@@ -2096,7 +2096,7 @@ void		onexit()
 {
     if (globals.pid_path != NULL)
     {
-	if (!isatty(fileno(stdin)))
+	if (!isatty(0))
 	    info("removing %s", globals.pid_path);
 	unlink(globals.pid_path);
     }
@@ -2107,7 +2107,6 @@ int		main(int ac, char **av)
     glob_t	*g = &globals;
     pid_t	pid;
 
-    atexit(onexit);
     parse_args(g, ac, av);
     conf_init(g);
     get_cfgpath(g);
@@ -2127,16 +2126,9 @@ int		main(int ac, char **av)
 
     if ((pid = fork()) == 0)
     {
-	FILE	*fp;
 	int	max = getdtablesize(), errs = 0, fd;
 
-	if ((fp = fopen(g->pid_path, "w")) != NULL)
-	{
-	    fprintf(fp, "%d\n", getpid());
-	    fclose(fp);
-	}
-	else
-	    errexit(EX_PID, errno, "cannot create \"%s\"", g->pid_path);
+	atexit(onexit);
 
 	trace(TL_EXEC, "becoming a daemon");
 	fclose(stdin);	/* 0 */
@@ -2205,7 +2197,19 @@ int		main(int ac, char **av)
 	info("exit from main loop (=%d)", g->loop);
     }
     else if (pid > 0)
+    {
+	FILE	*fp;
+
+	if ((fp = fopen(g->pid_path, "w")) != NULL)
+	{
+	    fprintf(fp, "%d\n", pid);
+	    fclose(fp);
+	}
+	else
+	    errexit(EX_PID, errno, "cannot create \"%s\"", g->pid_path);
+
 	printf("%s started (PID=%d)\n", g->prg, pid);
+    }
     else
 	errexit(EX_FORK, errno, "cannot fork daemon process");
 

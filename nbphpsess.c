@@ -1671,7 +1671,7 @@ void 		terminate(int sig)
 
 void		onexit()
 {
-    if (!isatty(fileno(stdin)))
+    if (!isatty(0))
 	usleep(500 * 1000);
 }
 
@@ -1689,7 +1689,7 @@ int		main(int ac, char **av)
     info("----------------------------------------");
     info("Starting %s PID=%d - Reload sig is %s", g->prg, getpid(), sigstr(g, g->SigReload));
 
-    if (!isatty(fileno(stdin)))
+    if (!isatty(0))
     {
 	signal(SIGINT, SIG_IGN);
 	signal(SIGQUIT, SIG_IGN);
