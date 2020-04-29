@@ -1347,7 +1347,7 @@ bool		setup_loop(glob_t *g)
     if (g->allevt)
 	info("Watching directory \"%s\"", g->SessDir);
     else
-	info("Watching directory \"%s\" %s=%d", g->SessDir, g->VarMaxActive, g->MaxActive);
+	info("Watching directory \"%s\" (%s = %d)", g->SessDir, g->VarMaxActive, g->MaxActive);
 
     if ((g->ifd = inotify_init()) < 0)
     {
@@ -1365,7 +1365,10 @@ bool		setup_loop(glob_t *g)
     if (g->allevt)
 	info("waiting for %s", event_mask(IN_ALL_EVENTS));
     else if (g->sessions == NULL)
+    {
 	g->sessions = xmalloc(g->MaxActive * sizeof(sess_t));
+	memset(g->sessions, '\0', g->MaxActive * sizeof(sess_t));
+    }
 
     scan_dir(g);
 
