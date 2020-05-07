@@ -1380,7 +1380,7 @@ void		handle_events(glob_t *g, timeval_t *timeout)
     fd_set	readfd;
     int		ret;
 
-    if (timeout->tv_sec > 0 || timeout->tv_usec > 0)
+    if (timeout != NULL)
 	trace(TL_EVNT, "left=%d.%03d", timeout->tv_sec, timeout->tv_usec / 1000);
     FD_ZERO(&readfd);
     FD_SET(g->ifd, &readfd);
@@ -1504,7 +1504,7 @@ void		watch_sessions(glob_t *g)
     timeval_t	now, freq, next, left;
 
     trace(TL_EVNT, "freq=%d", g->ReportFreq);
-    if (gettimeofday(&now, NULL) < 0)
+    if (gettimeofday(&now, NULL) < 0)	/* EINVAL ? */
     {
 	error(errno, "gettimeofday");
 	sleep(g->ReportFreq);
@@ -1512,16 +1512,18 @@ void		watch_sessions(glob_t *g)
     }
     freq.tv_sec = g->ReportFreq;
     freq.tv_usec = 0;
-    timeradd(&now, &freq, &next);
-    while (timercmp(&now, &next, <) > 0)
+    timeradd(&now, &freq, &next);	/* next = now + freq */
+    while (timercmp(&now, &next, <))	/* now < next ? */
     {
-	timersub(&next, &now, &left);
+	timersub(&next, &now, &left);	/* left = next - now */
 	handle_events(g, &left);
-	if (gettimeofday(&now, NULL) < 0)
+	if (gettimeofday(&now, NULL) < 0)	/* EINVAL ? */
 	{
+	    time_t	t = time(NULL);
+
 	    error(errno, "gettimeofday");
-	    timersub(&next, &now, &left);
-	    sleep(g->ReportFreq - left.tv_sec);
+	    if (next.tv_sec > t)
+		sleep(next.tv_sec - t);
 	    return;
 	}
     }
@@ -1710,11 +1712,7 @@ int		main(int ac, char **av)
     {
 	if (g->allevt)
 	{
-	    timeval_t	left;
-
-	    left.tv_sec = 0;	/* Do not time-out */
-	    left.tv_usec = 0;
-	    handle_events(g, &left);
+	    handle_events(g, NULL);	/* Do not time-out */
 	}
 	else
 	{
