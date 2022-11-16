@@ -3,7 +3,7 @@
 #
 #	Use: make debug to make debug-version of executables
 #
-BINS = modif
+BINS = modif real mkd
 
 prod:	CFLAGS	= -O -Wall
 prod:	LDFLAGS	= -s
