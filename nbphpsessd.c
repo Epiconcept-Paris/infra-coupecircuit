@@ -1,7 +1,7 @@
 /*
  *  nbphpsessd.c
  *
- *	(C) 2020 by Christophe de Traversay <devel@traversay.com>
+ *	(C) 2020-2022 by Christophe de Traversay <devel@traversay.com>
  *
  *	- become daemon
  *	- Setup av[1] and av[2] connected by pipes
@@ -13,8 +13,8 @@
  *	- kill them both if SIGTERM, pass on SIGUSR1 (session ?)
  */
 #define _GNU_SOURCE
-#define _BSD_SOURCE
 #define _POSIX_SOURCE
+#define _DEFAULT_SOURCE
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -490,10 +490,7 @@ static char	*getfile(char *path, int *plen)
 	    *plen = len;
 	return big;
     }
-    if (big != NULL)
-	xfree(big);
-
-    return NULL;
+    return xfree(big);
 }
 
 /*
@@ -656,7 +653,7 @@ static void	get_cfgpath(glob_t *g)
 		}
 		bad = real;
 	    }
-	    else if ((p = strrchr(g->cfg_arg, '/')) == NULL)
+	    else if ((p = strrchr(g->cfg_arg, '/')) != NULL)
 		strcpy(cfgfile, p + 1);
 	    else
 		bad = g->cfg_arg;;
@@ -1222,6 +1219,35 @@ void		parse_args(glob_t *g, int ac, char **av)
 	notice("ignoring %d extra arguments", ac);
 }
 
+void		mkdir_p(char *dir)
+{
+    char	*p, c;
+    int		len, ret;
+    struct stat	sb;
+
+    len = strlen(dir);
+    while (dir[len - 1] == '/')
+	dir[--len] = '\0';
+
+    p = dir + 1;
+    for (;;)
+    {
+	c = *p;
+	if (c == '/' || c == '\0')	// Check at dir-sep or end
+	{
+	    *p = '\0';
+	    ret = (stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode)) ? 0 : mkdir(dir, 0777);
+	    if (ret < 0)
+		break;
+	    if (c == '\0')
+		return;
+	    *p = c;
+	}
+	p++;
+    }
+    errexit(EX_PATH, errno, "cannot create directory %s", dir);
+}
+
 void		check_pidfile(glob_t *g)
 {
     FILE	*fp;
@@ -1242,7 +1268,12 @@ void		check_pidfile(glob_t *g)
      */
     trace(TL_CONF, "trying run_dir = %s", dir);
     if (access(dir, W_OK) != 0 && !g->kill_prg)
-	errexit(EX_PATH, 0, "cannot write to directory %s", dir);
+    {
+	if (errno == ENOENT)
+	    mkdir_p(dir);
+	else
+	    errexit(EX_PATH, errno, "cannot write to directory %s", dir);
+    }
     xasprintf(&path, "%s/%s.pid", dir, g->prg);	/* free: never (init) */
     if ((fp = fopen(path, "r")) != NULL)
     {
@@ -1280,7 +1311,7 @@ void		check_pidfile(glob_t *g)
 
 /*
  *  Check write perms on arg and its directory
- *  If arg does not start with /, canonize in in static dir -> *pp
+ *  If arg does not start with /, canonize it in static dir -> *pp
  *  If write allowed on arg, return true, false otherwise
  *  If neither file nor directory are writable *dp is NULL and *fp = arg
  *  If file is writable but not directory, directory part is returned in *dp
@@ -1938,6 +1969,18 @@ void 		trap_sig(int sig)
     globals.sig = sig;
 }
 
+void		sig_intr(int sig, int flag)
+{
+    struct sigaction act;
+
+    sigaction(sig, NULL, &act);
+    if (flag)
+	act.sa_flags &= ~SA_RESTART;
+    else
+	act.sa_flags |= SA_RESTART;
+    sigaction(sig, &act, NULL);
+}
+
 /*
  *  Three tasks in this function:
  *	1: on parse_conf at init, check config values
@@ -2038,13 +2081,13 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 	if (newRld != g->SigReload && newRld != g->SigRotate)
 	{
 	    signal(newRld, trap_sig);
-	    siginterrupt(newRld, 1);
+	    sig_intr(newRld, 1);
 	}
 	/*  If newRot was not already setup, set it up */
 	if (newRot != g->SigRotate && newRot != g->SigReload)
 	{
 	    signal(newRot, trap_sig);
-	    siginterrupt(newRot, 1);
+	    sig_intr(newRot, 1);
 	}
 	/* Set any other sig back to default */
 	for (i = 0; i < sizeof traps / sizeof(struct trap); i++)
@@ -2052,7 +2095,7 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 	    if (traps[i].sig != newRld && traps[i].sig != newRot)
 	    {
 		signal(traps[i].sig, traps[i].def);
-		siginterrupt(traps[i].sig, 0);
+		sig_intr(traps[i].sig, 0);
 	    }
 	}
 	return 0;
@@ -2069,8 +2112,8 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
     }
     signal(g->SigReload, trap_sig);
     signal(g->SigRotate, trap_sig);
-    siginterrupt(g->SigReload, 1);
-    siginterrupt(g->SigRotate, 1);
+    sig_intr(g->SigReload, 1);
+    sig_intr(g->SigRotate, 1);
 
     return 0;
 }
@@ -2161,7 +2204,7 @@ int		main(int ac, char **av)
 	signal(SIGQUIT, SIG_IGN);
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGTERM, terminate);
-	siginterrupt(SIGTERM, 1);
+	sig_intr(SIGTERM, 1);
 	apply_conf(g, NULL);
 	g->loop = 1;
 

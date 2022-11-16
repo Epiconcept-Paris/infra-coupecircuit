@@ -588,7 +588,7 @@ static void	get_cfgpath(glob_t *g)
 		}
 		bad = real;
 	    }
-	    else if ((p = strrchr(g->cfg_arg, '/')) == NULL)
+	    else if ((p = strrchr(g->cfg_arg, '/')) != NULL)
 		strcpy(cfgfile, p + 1);
 	    else
 		bad = g->cfg_arg;;
@@ -1561,6 +1561,18 @@ void 		trap_sig(int sig)
     globals.sig = sig;
 }
 
+void		sig_intr(int sig, int flag)
+{
+    struct sigaction act;
+
+    sigaction(sig, NULL, &act);
+    if (flag)
+	act.sa_flags &= ~SA_RESTART;
+    else
+	act.sa_flags |= SA_RESTART;
+    sigaction(sig, &act, NULL);
+}
+
 /*
  *  Two tasks in this function:
  *	1: on parse_conf at init, check config values
@@ -1628,7 +1640,7 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 	if (newRld != g->SigReload)
 	{
 	    signal(newRld, trap_sig);
-	    siginterrupt(newRld, 1);
+	    sig_intr(newRld, 1);
 	}
 	/* Set any other sig back to default */
 	for (i = 0; i < sizeof traps / sizeof(struct trap); i++)
@@ -1636,7 +1648,7 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 	    if (traps[i].sig != newRld)
 	    {
 		signal(traps[i].sig, traps[i].def);
-		siginterrupt(traps[i].sig, 0);
+		sig_intr(traps[i].sig, 0);
 	    }
 	}
 	return 0;
@@ -1652,7 +1664,7 @@ int		apply_conf(glob_t *g, cfgval_t *nv)
 	    signal(traps[i].sig, traps[i].def);
     }
     signal(g->SigReload, trap_sig);
-    siginterrupt(g->SigReload, 1);
+    sig_intr(g->SigReload, 1);
 
     return 0;
 }
@@ -1701,7 +1713,7 @@ int		main(int ac, char **av)
     }
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, terminate);
-    siginterrupt(SIGTERM, 1);
+    sig_intr(SIGTERM, 1);
     apply_conf(g, NULL);
 
     setlinebuf(stdout);
