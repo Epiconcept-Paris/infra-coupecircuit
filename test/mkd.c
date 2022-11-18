@@ -37,33 +37,27 @@ void errmsg(int xc, int er, const char *fn, int ln, char *fmt, ...)
 
 void		mkdir_p(char *dir)
 {
-    char	*p, c;
-    int		len, ret;
+    char	*last = dir + strlen(dir),
+		*prev, *ptr;
     struct stat	sb;
 
-    len = strlen(dir);
-    while (dir[len - 1] == '/')
-	dir[--len] = '\0';
-
     debug("dir=\"%s\"", dir);
-    p = dir + 1;
-    for (;;)
+    for (ptr = prev = dir; ptr <= last; prev = ptr++)
     {
-	c = *p;
-	if (c == '/' || c == '\0')	// Check at dir-sep or end
+	if (*ptr == '/' || *ptr == '\0')	/* At subdir or end */
 	{
-	    *p = '\0';
+	    debug("*ptr='%c'", *ptr);
+	    if (*prev == '/')			/* Skip multiple '/' */
+		continue;
+	    if (*ptr == '/')			/* We have a subdir */
+		*ptr = '\0';
 	    debug("sub=\"%s\"", dir);
-	    ret = (stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode)) ? 0 : mkdir(dir, 0777);
-	    if (ret < 0)
-		break;
-	    if (c == '\0')
-		return;
-	    *p = c;
+	    if (((stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode)) ? 0 : mkdir(dir, 0777)) < 0)
+		errexit(EX_PATH, errno, "cannot create directory '%s'", dir);
+	    if (ptr < last)			/* Put back the '/' for subdirs */
+		*ptr = '/';
 	}
-	p++;
     }
-    errexit(EX_PATH, errno, "cannot create directory %s", dir);
 }
 
 int main(int ac, char *av[])
