@@ -199,7 +199,7 @@ glob_t		globals = {
     }
     {
 	{ "trace_level",	1, 1, intv, { .i = NUMIVAL },	{ .i = 0 },		0, {},
-				"trace level (16:conf, 32:inotity, 64:events)" },
+				"trace level (16:conf, 32:inotify, 64:events)" },
 	{ "sess_dir",		1, 0, NULL, { .s = STRIVAL },	{ .s = "/var/lib/php/sessions" }, 0, {},
 				"main directory to watch (if relative, to work_dir)" },
 	{ "max_active_sess",	1, 1, intv, { .i = NUMIVAL },	{ .i = 16384 },		0, {},
@@ -219,7 +219,7 @@ glob_t		globals = {
 	{ "conf_reload_sig",	1, 1, sigv, { .i = NUMIVAL },	{ .i = SIGUSR1 },	0, {},
 				"conf-reload signal (SIGxxx also accepted)" }
     },
-    /* Make sur these match struct glob_s ! */
+    /* Make sure these match struct glob_s ! */
     NULL, NULL, 0, NULL, NULL, NULL, -1, -1
 };
 /*} End init globals */
@@ -373,13 +373,17 @@ static void	xitmsg(int xcode, int syserr, const char *fn, int ln, char *fmt, ...
 {
     va_list	ap;
     char	buf[LOG_BUF_SIZE];
+    int		off = 0;
+    bool	log = (globals.log_fp != NULL || fd_type(fileno(stderr)) != 'c');
 
+    if (log && xcode != EX_OK)
+	buf[off++] = '#';	/* also send to syslog */
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
+    vsnprintf(buf + off, (sizeof buf - off), fmt, ap);
     va_end(ap);
     /* force trace if EX_LOGIC */
     loglines(syserr, fn, ln, xcode == EX_LOGIC ? NULL : "", buf);
-    if (globals.log_fp != NULL || fd_type(fileno(stderr)) != 'c')
+    if (log)
 	info("exiting with code=%d", xcode);
 
     exit(xcode);

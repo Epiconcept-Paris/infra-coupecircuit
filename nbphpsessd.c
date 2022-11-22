@@ -325,15 +325,19 @@ static char	fd_type(int fd)
 /*  Log line (called by logmsg(), trcmsg() and xitmsg()) */
 static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
 {
-    bool	log = (globals.log_fp != NULL);
+    bool	log = (globals.log_fp != NULL), sl = false;
     FILE	*fp = log ? globals.log_fp : stderr;
     char	*line, *p, ft = fd_type(fileno(fp));
-    int		nl;
+    int		nl = 0;
 
     if (*msg == '\0')
 	return;
 
-    nl = 0;
+    if (*msg == '#')		/* also send to syslog */
+    {
+	sl = true;
+	msg++;
+    }
     p = msg;
     while ((line = strsep(&p, "\r\n")) != NULL)
     {
@@ -371,6 +375,27 @@ static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
 
 	fputc('\n', fp);
 	fflush(fp);
+	if (sl)
+	{
+	    void    log_sys(glob_t *, const char *, ...);
+
+	    if (nl == 0)
+	    {
+		char pfx[64];
+
+		pfx[0] = '\0';
+		if (tag == NULL)	/* trace (forced for EX_LOGIC) */
+		    snprintf(pfx, sizeof pfx, "%s:%d ", fn, ln);
+		else if (*tag != '\0')	/* all others but info */
+		    snprintf(pfx, sizeof pfx, "%s", tag);
+		if (syserr > 0)
+		    log_sys(&globals, "%s%s: %s (errno=%d)", pfx, line, strerror(syserr), syserr);
+		else
+		    log_sys(&globals, "%s%s", pfx, line);
+	    }
+	    else
+		log_sys(&globals, "    %s", line);
+	}
 	nl++;
     }
 }
@@ -395,13 +420,17 @@ static void	xitmsg(int xcode, int syserr, const char *fn, int ln, char *fmt, ...
 {
     va_list	ap;
     char	buf[LOG_BUF_SIZE];
+    int		off = 0;
+    bool	log = (globals.log_fp != NULL || fd_type(fileno(stderr)) != 'c');
 
+    if (log && xcode != EX_OK)
+	buf[off++] = '#';	/* also send to syslog */
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
+    vsnprintf(buf + off, (sizeof buf - off), fmt, ap);
     va_end(ap);
     /* force trace if EX_LOGIC */
     loglines(syserr, fn, ln, xcode == EX_LOGIC ? NULL : "", buf);
-    if (globals.log_fp != NULL || fd_type(fileno(stderr)) != 'c')
+    if (log)
 	info("exiting with code=%d", xcode);
 
     exit(xcode);
@@ -1538,7 +1567,7 @@ void		open_logs(glob_t *g)
 	g->rep_fp = NULL;
     }
     if ((g->rep_fp = fopen(rep_path, "a")) == NULL)
-       log_sys(g, "cannot (re)open %s: %s (errno=%d)", rep_path, strerror(errno), errno);
+	log_sys(g, "cannot (re)open %s: %s (errno=%d)", rep_path, strerror(errno), errno);
 
     if (g->log_fp != NULL)
     {
@@ -1546,7 +1575,7 @@ void		open_logs(glob_t *g)
 	g->log_fp = NULL;
     }
     if ((g->log_fp = fopen(g->log_path, "a")) == NULL)
-       log_sys(g, "cannot (re)open %s: %s (errno=%d)", g->log_path, strerror(errno), errno);
+	log_sys(g, "cannot (re)open %s: %s (errno=%d)", g->log_path, strerror(errno), errno);
 }
 
 int		prepare_fdset(glob_t *g, fd_set *readfd)
@@ -1613,7 +1642,13 @@ void		get_put_log(FILE **from, FILE *to, char *name, char *tag)
 	else
 	    eol = "";
 
-	out = fprintf(to, "%s %s %s: %s%s", tstamp(0, " "), name, tag, buf, eol);
+	if (buf[0] == '#')
+	{
+	    out = fprintf(to, "%s %s %s: %s%s", tstamp(0, " "), name, tag, buf + 1, eol);
+	    log_sys(&globals, "%s %s: %s", name, tag, buf + 1);
+	}
+	else
+	    out = fprintf(to, "%s %s %s: %s%s", tstamp(0, " "), name, tag, buf, eol);
 	trace(TL_LOGS, "from fd=%d: %d bytes to fd=%d: %d bytes", fileno(*from), in, fileno(to), out);
     }
     fflush(to);
