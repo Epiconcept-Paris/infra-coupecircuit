@@ -306,48 +306,49 @@ static void	loglines(int syserr, const char *fn, int ln, char *tag, char *msg)
     bool	log = (globals.log_fp != NULL);
     FILE	*fp = log ? globals.log_fp : stderr;
     char	*line, *p, ft = fd_type(fileno(fp));
-    int		nl;
+    int		nl = 0;
 
     if (*msg == '\0')
 	return;
 
-    nl = 0;
     p = msg;
     while ((line = strsep(&p, "\r\n")) != NULL)
     {
+	char	pfx[64], sfx[64];
+	int	nb = 0;
+
 	if (*line == '\0')	/* discard empty lines */
 	    continue;
 
-	/* prefix for all lines */
+	pfx[0] = sfx[0] = '\0';
+	/* prefix for all lines on log to file */
 	if (log || ft == 'f')
-	    fprintf(fp, "%s\t", tstamp(0, " "));
+	    nb = snprintf(pfx, sizeof pfx, "%s\t", tstamp(0, " "));
 
-	/* prefixes */
+	/* other prefixes and error-suffix */
 	if (nl == 0)		/* 1st line */
 	{
+	    /* Add program name when interactive */
 	    if (!log && ft == 'c')
 	    {
 		if (*line != '\\')	/* add ':' only for info() */
-		    fprintf(stderr, "%s%s", globals.prg, (tag != NULL && *tag == '\0') ? ": " : " ");
+		    nb = snprintf(pfx, sizeof pfx, "%s%s", globals.prg, (tag != NULL && *tag == '\0') ? ": " : " ");
 		else
 		    line++;
 	    }
+	    /* Add function:line or tag */
 	    if (tag == NULL)		/* trace */
-		fprintf(fp, "%s:%d ", fn, ln);
+		nb += snprintf(pfx + nb, (sizeof pfx) - nb, "%s:%d ", fn, ln);
 	    else if (*tag != '\0')	/* all others but info */
-		fputs(tag, fp);
+		nb += snprintf(pfx + nb, (sizeof pfx) - nb, "%s", tag);
+	    /* Possible error-suffix */
+	    if (syserr > 0)
+		snprintf(sfx, sizeof sfx, ": %s (errno=%d)", strerror(syserr), syserr);
 	}
 	else
-	    fputs("    ", fp);	/* 4 spaces */
+	    nb += snprintf(pfx + nb, (sizeof pfx) - nb, "    ");	/* 4 spaces */
 
-	/* line as received */
-	fputs(line, fp);
-
-	/* suffix for 1st line: possible system error */
-	if (nl == 0 && syserr > 0)
-	    fprintf(fp, ": %s (errno=%d)", strerror(syserr), syserr);
-
-	fputc('\n', fp);
+	fprintf(fp, "%s%s%s\n", pfx, line, sfx);
 	fflush(fp);
 	nl++;
     }

@@ -1552,7 +1552,7 @@ void		log_sys(glob_t *g, const char *fmt, ...)
 
     va_start(ap, fmt);
     openlog(g->prg, LOG_PID, g->SyslogFac);
-    syslog(g->SyslogLvl, fmt, ap);
+    vsyslog(g->SyslogLvl, fmt, ap);
     closelog();
     va_end(ap);
 }
