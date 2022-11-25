@@ -27,7 +27,7 @@ Le fichier PHP doit bien sur être installé à l'endroit approprié dans un Doc
 
 Bien que le compteur ou le script-shell de rapport puissent chacun être utilisés directement en ligne de commande pour les tests (en détectant spécifiquement un fonctionnement interactif), la manière habituelle de lancer la chaine de comptage des sessions PHP est de lancer le `daemon` :
 ```
-/usr/local/lib/nbphpsessd
+/usr/local/lib/nbphpsess/nbphpsessd
 ```
 Cette commande peut-être suffisante si les valeurs par défaut du `daemon` conviennent, sinon voir l'explication détaillée ci-dessous.
 
